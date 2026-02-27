@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Environment (secrets)
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+dist/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Package manager
+.pnpm-store/
+.npm/
+
+# Agent credentials (generated on install, never commit)
+.pets-browser/
