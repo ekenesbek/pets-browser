@@ -221,7 +221,7 @@ Copy `.env.example` → `.env`:
 
 ```bash
 # Managed mode (subscription)
-PB_API_URL=https://api.petsbrowser.dev/pets-browser/v1
+PB_API_URL=https://api.clawpets.io/pets-browser/v1
 # PB_AGENT_TOKEN=PB1.<agentId>.<agentSecret>
 # PB_AGENT_ID=
 # PB_AGENT_SECRET=
@@ -294,4 +294,3 @@ All backend architecture, endpoints, storage model, and deployment steps are doc
 ## License
 
 MIT
-# pets-browser
