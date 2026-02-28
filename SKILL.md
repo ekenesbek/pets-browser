@@ -27,6 +27,14 @@ clawhub install pets-browser
 
 This installs Chromium via Playwright automatically. No separate browser download needed.
 
+**Important (Linux/Docker):** If Chromium fails to launch with missing library errors (e.g. `libnspr4.so`), install system dependencies:
+
+```bash
+npx playwright install-deps chromium
+# or manually:
+apt-get update && apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2
+```
+
 ## First-Run Onboarding
 
 `launchBrowser()` is **zero-config** — it auto-registers a new agent and saves credentials if none exist.
