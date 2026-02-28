@@ -24,6 +24,7 @@ const readline = require('readline');
 
 const CREDENTIALS_DIR = path.join(os.homedir(), '.pets-browser');
 const CREDENTIALS_FILE = path.join(CREDENTIALS_DIR, 'agent-credentials.json');
+const DEFAULT_API_URL = 'https://api.clawpets.io/pets-browser/v1';
 
 const AGENT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const AGENT_SECRET_RE = /^[A-Za-z0-9_-]{32,200}$/;
@@ -189,7 +190,7 @@ async function promptForExistingCredentials() {
 }
 
 async function rotateSecretWithApi(credentials) {
-  const apiUrl = process.env.PB_API_URL;
+  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
   if (!apiUrl || !credentials.recoveryCode) {
     return false;
   }
@@ -219,12 +220,7 @@ async function rotateSecretWithApi(credentials) {
 }
 
 async function registerWithApi(credentials) {
-  const apiUrl = process.env.PB_API_URL;
-  if (!apiUrl) {
-    console.log('[pets-browser] No PB_API_URL set - skipping API registration.');
-    console.log('  Set PB_API_URL to enable managed proxies and CAPTCHA solving.');
-    return;
-  }
+  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
 
   const url = `${apiUrl.replace(/\/$/, '')}/agents/register`;
 

@@ -5,13 +5,16 @@
  * Appears as iPhone 15 Pro or Desktop Chrome to every website.
  * Bypasses Cloudflare, DataDome, PerimeterX out of the box.
  *
- * Service: https://petsbrowser.dev
+ * Service: https://clawpets.io
  *
  * Usage:
  *   const { launchBrowser, solveCaptcha } = require('./browser');
  *   const { browser, page } = await launchBrowser({ country: 'us' });
  *
- * Proxy config via env vars:
+ * Zero-config: launchBrowser() auto-registers a new agent on first call.
+ * No env vars required. Credentials are saved to ~/.pets-browser/agent-credentials.json.
+ *
+ * Proxy config via env vars (optional — BYO mode):
  *   PB_PROXY_PROVIDER  — decodo | brightdata | iproyal | nodemaven (default: decodo)
  *   PB_PROXY_USER      — proxy username
  *   PB_PROXY_PASS      — proxy password
@@ -20,8 +23,8 @@
  *   PB_PROXY_SESSION   — Decodo sticky port 10001-49999 (unique IP per user)
  *   PB_NO_PROXY        — set to "1" to disable proxy entirely
  *
- * Service credentials (subscription mode):
- *   PB_API_URL         — Pets Browser API base URL
+ * Service credentials (optional — auto-generated if not set):
+ *   PB_API_URL         — Pets Browser API base URL (default: https://api.clawpets.io/pets-browser/v1)
  *   PB_AGENT_TOKEN     — Full auth token: PB1.<agentId>.<agentSecret>
  *   PB_AGENT_ID        — Agent UUID (alternative to token)
  *   PB_AGENT_SECRET    — Agent secret (alternative to token)
@@ -193,8 +196,7 @@ function makeProxy(sessionId = null, country = null) {
   //    Access is gated on _proxyAllowed, which is set by getCredentials() from the server's
   //    sessionGranted flag. If trial is exceeded, we return null so the browser runs without
   //    the managed proxy (will get CAPTCHAs) rather than receiving 407 from the forward proxy.
-  const apiUrl = process.env.PB_API_URL;
-  if (!apiUrl) return null;
+  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
 
   if (!_proxyAllowed) {
     // Trial expired or getCredentials() hasn't been called yet / returned sessionGranted=false
@@ -223,9 +225,12 @@ function makeProxy(sessionId = null, country = null) {
 
 // ─── AGENT CREDENTIALS ───────────────────────────────────────────────────────
 
-const _path = require('path');
-const _fs   = require('fs');
-const _os   = require('os');
+const _path   = require('path');
+const _fs     = require('fs');
+const _os     = require('os');
+const _crypto = require('crypto');
+
+const DEFAULT_API_URL = 'https://api.clawpets.io/pets-browser/v1';
 
 const CREDENTIALS_FILE = _path.join(_os.homedir(), '.pets-browser', 'agent-credentials.json');
 const PROFILES_DIR = _path.join(_os.homedir(), '.pets-browser', 'profiles');
@@ -365,6 +370,65 @@ function resolveAgentToken() {
   return creds ? buildAgentToken(creds.agentId, creds.agentSecret) : null;
 }
 
+/**
+ * Auto-register a new agent with the Pets Browser API.
+ * Generates credentials, registers with the server, and saves to disk.
+ * Called automatically by launchBrowser() when no credentials are found.
+ *
+ * @param {string} apiUrl — API base URL
+ * @returns {{ agentId, agentSecret, recoveryCode } | null}
+ */
+async function autoRegisterAgent(apiUrl) {
+  const agentId = _crypto.randomUUID();
+  const agentSecret = _crypto.randomBytes(32).toString('base64url');
+  const recoveryCode = _crypto.randomBytes(24).toString('base64url');
+
+  console.log('[pets-browser] No credentials found. Auto-registering new agent...');
+
+  try {
+    const resp = await fetch(`${apiUrl.replace(/\/$/, '')}/agents/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId, agentSecret, recoveryCode }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      console.warn(`[pets-browser] Auto-registration failed (HTTP ${resp.status}): ${text}`);
+      return null;
+    }
+
+    const data = await resp.json();
+    console.log(`[pets-browser] Agent registered. Trial: ${data.trialLimit ?? 1} free session(s).`);
+  } catch (err) {
+    console.warn(`[pets-browser] Auto-registration failed: ${err.message}`);
+    return null;
+  }
+
+  // Save credentials to disk
+  const creds = {
+    agentId,
+    agentSecret,
+    recoveryCode,
+    createdAt: new Date().toISOString(),
+  };
+
+  try {
+    _fs.mkdirSync(_path.dirname(CREDENTIALS_FILE), { recursive: true, mode: 0o700 });
+    _fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 });
+    console.log(`[pets-browser] Credentials saved to ${CREDENTIALS_FILE}`);
+  } catch (err) {
+    console.warn(`[pets-browser] Could not save credentials to disk: ${err.message}`);
+  }
+
+  // Set env vars for current process so resolveAgentCredentials() picks them up
+  process.env.PB_AGENT_ID = agentId;
+  process.env.PB_AGENT_SECRET = agentSecret;
+
+  return creds;
+}
+
 // ─── SERVICE CREDENTIALS ──────────────────────────────────────────────────────
 
 /**
@@ -382,7 +446,7 @@ function resolveAgentToken() {
  * @returns {{ ok: boolean, proxy?, captcha?, trialRemaining? }}
  */
 async function getCredentials() {
-  const apiUrl = process.env.PB_API_URL;
+  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
 
   // Resolve agent auth token
   const agentToken = resolveAgentToken();
@@ -572,7 +636,7 @@ async function solveCaptcha(page, opts = {}) {
   let token = null;
 
   // Try server-side solving first (managed mode — no API key needed)
-  const apiUrl = process.env.PB_API_URL;
+  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
   const agentToken = resolveAgentToken();
 
   if (apiUrl && agentToken) {
@@ -782,26 +846,27 @@ async function launchBrowser(opts = {}) {
     }
   }
 
-  // ── Fresh launch: fetch credentials (counts as 1 trial session + gets captcha key) ──
-  if (process.env.PB_API_URL) {
-    try {
-      await getCredentials();
-    } catch (e) {
-      console.warn('[pets-browser] Could not fetch managed credentials:', e.message);
-    }
+  // ── Fresh launch: ensure credentials exist and fetch managed config ──
+  if (!resolveAgentCredentials()) {
+    await autoRegisterAgent(process.env.PB_API_URL || DEFAULT_API_URL);
+  }
+  try {
+    await getCredentials();
+  } catch (e) {
+    console.warn('[pets-browser] Could not fetch managed credentials:', e.message);
   }
 
   const device = buildDevice(mobile, cty);
   const meta   = COUNTRY_META[cty.toLowerCase()] || COUNTRY_META.us;
   const proxy  = useProxy ? makeProxy(session, cty) : null;
 
-  // Fail-closed: in managed mode, refuse to launch without proxy.
+  // Fail-closed: refuse to launch without proxy unless explicitly opted out.
   // A silent fallback to no-proxy would expose the agent's real datacenter IP,
   // defeating the entire purpose of a stealth browser.
   // Users who intentionally want no proxy must set useProxy:false or PB_NO_PROXY=1.
-  if (useProxy && process.env.PB_API_URL && !proxy) {
+  if (useProxy && !proxy && process.env.PB_NO_PROXY !== '1') {
     throw new Error(
-      '[pets-browser] Managed proxy unavailable — credentials fetch failed or trial/subscription expired. ' +
+      '[pets-browser] Proxy unavailable — auto-registration failed or trial/subscription expired. ' +
       'Set PB_NO_PROXY=1 to launch without proxy, or provide BYO credentials via PB_PROXY_SERVER/PB_PROXY_USER.'
     );
   }
@@ -962,7 +1027,7 @@ async function pasteIntoEditor(page, editorSelector, text) {
 
 module.exports = {
   // Main
-  launchBrowser, closeBrowser, getCredentials,
+  launchBrowser, closeBrowser, getCredentials, autoRegisterAgent,
 
   // Human-like interaction
   humanClick, humanMouseMove, humanType, humanScroll, humanRead,

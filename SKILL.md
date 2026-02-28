@@ -27,9 +27,11 @@ clawhub install pets-browser
 
 This installs Chromium via Playwright automatically. No separate browser download needed.
 
-## First-Run Onboarding (IMPORTANT — agent must follow this flow)
+## First-Run Onboarding
 
-On first use, the agent MUST complete this onboarding sequence before calling `launchBrowser()`:
+`launchBrowser()` is **zero-config** — it auto-registers a new agent and saves credentials if none exist.
+
+However, on first use the agent SHOULD check if the user already has credentials to avoid creating duplicate agents:
 
 ### Step 1: Check for existing credentials
 
@@ -38,67 +40,43 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const CREDS_FILE = path.join(os.homedir(), '.pets-browser', 'agent-credentials.json');
-let creds = null;
-try { creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8')); } catch {}
+let hasCreds = false;
+try { hasCreds = Boolean(JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8')).agentId); } catch {}
 ```
 
-If `creds` exists and has `agentId` + `agentSecret` → skip to Step 4.
+If credentials exist on disk → skip to Step 3 (just launch).
 
 ### Step 2: Ask the user
 
 Ask the user: **"Do you have existing Pets Browser credentials (agentId:agentSecret), or should I create new ones?"**
 
-- If user provides credentials → parse them, save to `CREDS_FILE`, skip to Step 4.
-- If user says "new" or "no" → proceed to Step 3.
-
-### Step 3: Register new agent
-
-Generate credentials and register with the server:
-
+- If user provides credentials → save them to `CREDS_FILE`:
 ```javascript
-const crypto = require('crypto');
-const agentId = crypto.randomUUID();
-const agentSecret = crypto.randomBytes(32).toString('base64url');
-const recoveryCode = crypto.randomBytes(24).toString('base64url');
-
-const API_URL = process.env.PB_API_URL || 'https://api.clawpets.io/pets-browser/v1';
-
-const resp = await fetch(`${API_URL}/agents/register`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ agentId, agentSecret, recoveryCode }),
-});
-const result = await resp.json();
-// result: { agentId, status: "active", created: true, trialLimit: 10 }
-```
-
-Save to disk:
-```javascript
+const [agentId, agentSecret] = userInput.split(':');
 fs.mkdirSync(path.dirname(CREDS_FILE), { recursive: true, mode: 0o700 });
-fs.writeFileSync(CREDS_FILE, JSON.stringify({
-  agentId, agentSecret, recoveryCode,
-  createdAt: new Date().toISOString(),
-}, null, 2), { mode: 0o600 });
+fs.writeFileSync(CREDS_FILE, JSON.stringify({ agentId, agentSecret, createdAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
 ```
+- If user says "new" or "no" → skip to Step 3. `launchBrowser()` will auto-register.
 
-**Show credentials to user and ask to save them:**
-```
-Your Pets Browser credentials (save these!):
-  agentId:      <uuid>
-  agentSecret:  <secret>
-  recoveryCode: <code>
-Free trial: 2 hours from first browser launch.
-```
-
-### Step 4: Set environment and launch
+### Step 3: Launch
 
 ```javascript
-process.env.PB_API_URL = process.env.PB_API_URL || 'https://api.clawpets.io/pets-browser/v1';
-process.env.PB_AGENT_ID = creds.agentId;
-process.env.PB_AGENT_SECRET = creds.agentSecret;
+const { launchBrowser } = require('pets-browser/scripts/browser');
+const { browser, page } = await launchBrowser({ country: 'us' });
 ```
 
-Now `launchBrowser()` will work with managed proxy + CAPTCHA.
+That's it. No env vars needed. `launchBrowser()` will:
+1. Find credentials on disk (or auto-register a new agent with the API)
+2. Fetch managed proxy + CAPTCHA keys
+3. Launch stealth Chromium with residential proxy
+
+After first launch, show credentials to user:
+```javascript
+const creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8'));
+console.log(`agentId: ${creds.agentId}`);
+console.log(`agentSecret: ${creds.agentSecret}`);
+// Ask user to save these for future use / transfer
+```
 
 ## Agent Credentials & Subscription
 
