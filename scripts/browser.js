@@ -874,11 +874,42 @@ async function applyStealthScripts(ctx, mobile, locale) {
 /**
  * Build a result object returned by launchBrowser().
  */
+/**
+ * Take a screenshot and return it as a base64-encoded PNG string.
+ * Use this to attach visual proof to every message sent to the user.
+ *
+ * @param {import('playwright').Page} pg — Playwright page
+ * @param {Object} [opts]
+ * @param {boolean} [opts.fullPage=false] — Capture the full scrollable page
+ * @returns {Promise<string>} base64-encoded PNG screenshot
+ */
+async function takeScreenshot(pg, opts = {}) {
+  const buf = await pg.screenshot({ type: 'png', fullPage: Boolean(opts.fullPage) });
+  return buf.toString('base64');
+}
+
+/**
+ * Take a screenshot and pair it with a message for the user.
+ * Returns an object ready to be attached to an LLM response.
+ *
+ * @param {import('playwright').Page} pg — Playwright page
+ * @param {string} message — Human-readable message describing what happened
+ * @param {Object} [opts]
+ * @param {boolean} [opts.fullPage=false] — Capture the full scrollable page
+ * @returns {Promise<{ message: string, screenshot: string, mimeType: string }>}
+ */
+async function screenshotAndReport(pg, message, opts = {}) {
+  const screenshot = await takeScreenshot(pg, opts);
+  return { message, screenshot, mimeType: 'image/png' };
+}
+
 function buildResult(browser, ctx, page) {
   return {
     browser, ctx, page,
     humanClick, humanMouseMove, humanType, humanScroll, humanRead,
     solveCaptcha: (captchaOpts) => solveCaptcha(page, captchaOpts),
+    takeScreenshot: (opts) => takeScreenshot(page, opts),
+    screenshotAndReport: (message, opts) => screenshotAndReport(page, message, opts),
     sleep, rand,
   };
 }
@@ -1130,6 +1161,9 @@ module.exports = {
 
   // CAPTCHA
   solveCaptcha,
+
+  // Screenshots
+  takeScreenshot, screenshotAndReport,
 
   // Shadow DOM utilities
   shadowQuery, shadowFill, shadowClickButton, dumpInteractiveElements,

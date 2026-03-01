@@ -21,24 +21,45 @@ Use this skill whenever the agent needs to:
 
 ## Screenshot rules
 
-**ALWAYS attach a screenshot when communicating with the user.** The user cannot see the browser — you are their eyes.
+**ALWAYS attach a screenshot when communicating with the user.** The user cannot see the browser — you are their eyes. Every message to the user MUST include a screenshot. No exceptions.
 
-Take a screenshot (`await page.screenshot()`) and attach it to your message in these situations:
+### When to take screenshots
 
-1. **Before asking for confirmation** — "Book this table?" + screenshot of the filled form
-2. **When reporting an error** — "No slots available" + screenshot proving the result
-3. **When unable to complete an action** — "Authorization failed" + screenshot showing what happened
+**Every message you send to the user must have a screenshot attached.** Specifically:
+
+1. **Before asking for confirmation** — "Book this table?" + screenshot of the filled form. The user must SEE what they are confirming.
+2. **When reporting an error** — "No slots available" + screenshot proving the result. Without a screenshot, the user has no reason to trust you.
+3. **When unable to complete an action** — "Authorization failed" + screenshot showing what happened.
 4. **After every key step** — filled form, selected date, entered address, etc.
-5. **When completing the task** — "Done! Order placed" + screenshot of the final result/confirmation
+5. **When completing the task (MANDATORY)** — "Done! Order placed" + screenshot of the final result/confirmation page. The user must see proof that the action was completed.
+
+### How to take screenshots
+
+Use the built-in helpers returned by `launchBrowser()`:
 
 ```javascript
-// Take a screenshot and encode as base64 for the user
-const screenshot = await page.screenshot({ type: 'png' });
-const base64 = screenshot.toString('base64');
-// Attach to your response as an image
+const { page, takeScreenshot, screenshotAndReport } = await launchBrowser();
+
+// Option 1: just the base64 screenshot
+const base64 = await takeScreenshot();
+
+// Option 2: screenshot + message bundled together
+const report = await screenshotAndReport("Form filled. Confirm booking?");
+// → { message: "Form filled...", screenshot: "iVBOR...", mimeType: "image/png" }
 ```
 
-**Never** tell the user "the form is empty", "widget is disabled", or "no results" without attaching a screenshot as proof. The user must see what you see.
+Or directly via Playwright:
+```javascript
+const screenshot = await page.screenshot({ type: 'png' });
+const base64 = screenshot.toString('base64');
+```
+
+### Rules
+
+- **Never** tell the user "the form is empty", "widget is disabled", or "no results" without a screenshot as proof.
+- **Never** ask for confirmation without showing the current state of the page.
+- **Never** say "Done!" without a screenshot of the final result.
+- The user must see what you see. Always.
 
 ## Installation
 
@@ -216,7 +237,7 @@ Launch a stealth Chromium browser with residential proxy.
 | `profile` | string | `'default'` | Persistent profile name (`null` = ephemeral) |
 | `reuse` | boolean | `true` | Reuse running browser for this profile (new tab, same process) |
 
-Returns: `{ browser, ctx, page, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, sleep, rand }`
+Returns: `{ browser, ctx, page, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, takeScreenshot, screenshotAndReport, sleep, rand }`
 
 ### `solveCaptcha(page, opts)`
 
@@ -229,6 +250,26 @@ Auto-detect and solve CAPTCHA on the current page. Supports reCAPTCHA v2/v3, hCa
 | `verbose` | boolean | `false` | Log progress |
 
 Returns: `{ token, type, sitekey }`
+
+### `takeScreenshot(page, opts)`
+
+Take a screenshot and return it as a base64-encoded PNG string.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `fullPage` | boolean | `false` | Capture the full scrollable page |
+
+Returns: `string` (base64 PNG)
+
+### `screenshotAndReport(page, message, opts)`
+
+Take a screenshot and pair it with a message. Returns an object ready to attach to an LLM response.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `fullPage` | boolean | `false` | Capture the full scrollable page |
+
+Returns: `{ message, screenshot, mimeType }` — screenshot is base64 PNG
 
 ### `humanType(page, selector, text)`
 
