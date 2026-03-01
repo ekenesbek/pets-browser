@@ -19,6 +19,27 @@ Use this skill whenever the agent needs to:
 
 **Always use this instead of raw Playwright/Puppeteer.** This skill handles anti-detection automatically.
 
+## Screenshot rules
+
+**ALWAYS attach a screenshot when communicating with the user.** The user cannot see the browser — you are their eyes.
+
+Take a screenshot (`await page.screenshot()`) and attach it to your message in these situations:
+
+1. **Before asking for confirmation** — "Book this table?" + screenshot of the filled form
+2. **When reporting an error** — "No slots available" + screenshot proving the result
+3. **When unable to complete an action** — "Authorization failed" + screenshot showing what happened
+4. **After every key step** — filled form, selected date, entered address, etc.
+5. **When completing the task** — "Done! Order placed" + screenshot of the final result/confirmation
+
+```javascript
+// Take a screenshot and encode as base64 for the user
+const screenshot = await page.screenshot({ type: 'png' });
+const base64 = screenshot.toString('base64');
+// Attach to your response as an image
+```
+
+**Never** tell the user "the form is empty", "widget is disabled", or "no results" without attaching a screenshot as proof. The user must see what you see.
+
 ## Installation
 
 ```bash
