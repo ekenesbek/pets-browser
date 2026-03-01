@@ -327,6 +327,8 @@ function loadAgentCredentials() {
       return {
         agentId: data.agentId,
         agentSecret: data.agentSecret,
+        recoveryCode: data.recoveryCode || undefined,
+        rotatedAt: data.rotatedAt || undefined,
       };
     }
     return null;
@@ -341,10 +343,21 @@ function buildAgentToken(agentId, agentSecret) {
 
 /**
  * Resolve agent credentials from any supported source.
- * Priority: PB_AGENT_TOKEN > PB_AGENT_ID+PB_AGENT_SECRET > credentials file.
+ * Priority: rotated file > PB_AGENT_TOKEN > PB_AGENT_ID+PB_AGENT_SECRET > non-rotated file.
+ *
+ * Rotated credentials (saved after server-side secret rotation) take top priority
+ * because env vars may contain a stale original secret. After rotation, the file
+ * has the latest valid secret.
+ *
  * Returns { agentId, agentSecret } or null.
  */
 function resolveAgentCredentials() {
+  // 0. Rotated file credentials take top priority (server rotated the secret)
+  const fileCreds = loadAgentCredentials();
+  if (fileCreds?.rotatedAt) {
+    return { agentId: fileCreds.agentId, agentSecret: fileCreds.agentSecret };
+  }
+
   // 1. PB_AGENT_TOKEN=PB1.<agentId>.<agentSecret>
   const directToken = process.env.PB_AGENT_TOKEN?.trim();
   if (directToken && directToken.startsWith('PB1.')) {
@@ -361,8 +374,8 @@ function resolveAgentCredentials() {
     return { agentId: envAgentId, agentSecret: envAgentSecret };
   }
 
-  // 3. Saved file (~/.pets-browser/agent-credentials.json)
-  return loadAgentCredentials();
+  // 3. Non-rotated file (~/.pets-browser/agent-credentials.json)
+  return fileCreds;
 }
 
 function resolveAgentToken() {
@@ -379,11 +392,23 @@ function resolveAgentToken() {
  * @returns {{ agentId, agentSecret, recoveryCode } | null}
  */
 async function autoRegisterAgent(apiUrl) {
+  // Security: if credentials file or directory already exists, an agent was
+  // previously registered. Refuse to generate new ones — the user must either
+  // provide existing credentials via importCredentials() / env vars, or
+  // re-run postinstall interactively.
+  const credentialsDir = _path.dirname(CREDENTIALS_FILE);
+  if (_fs.existsSync(CREDENTIALS_FILE) || _fs.existsSync(credentialsDir)) {
+    console.error('[pets-browser] Agent account already exists.');
+    console.error('  Cannot generate new credentials — use importCredentials() to');
+    console.error('  provide your existing agentId and agentSecret instead.');
+    return null;
+  }
+
   const agentId = _crypto.randomUUID();
   const agentSecret = _crypto.randomBytes(32).toString('base64url');
   const recoveryCode = _crypto.randomBytes(24).toString('base64url');
 
-  console.log('[pets-browser] No credentials found. Auto-registering new agent...');
+  console.log('[pets-browser] First run — registering new agent...');
 
   try {
     const resp = await fetch(`${apiUrl.replace(/\/$/, '')}/agents/register`, {
@@ -427,6 +452,48 @@ async function autoRegisterAgent(apiUrl) {
   process.env.PB_AGENT_SECRET = agentSecret;
 
   return creds;
+}
+
+/**
+ * Import existing agent credentials provided by the user.
+ * ONLY saves credentials that the user explicitly provides — NEVER generates new ones.
+ * Use this when the user says "here are my credentials" or "use this agentId/secret".
+ *
+ * @param {string} agentId — existing agent UUID
+ * @param {string} agentSecret — existing agent secret
+ * @returns {{ ok: boolean, agentId: string } | { ok: false, error: string }}
+ */
+function importCredentials(agentId, agentSecret) {
+  if (!agentId || !agentSecret) {
+    return { ok: false, error: 'agentId and agentSecret are required' };
+  }
+  if (!AGENT_ID_RE.test(agentId)) {
+    return { ok: false, error: 'Invalid agentId format (expected UUID)' };
+  }
+  if (!AGENT_SECRET_RE.test(agentSecret)) {
+    return { ok: false, error: 'Invalid agentSecret format (expected 32-200 char base64url string)' };
+  }
+
+  const creds = {
+    agentId,
+    agentSecret,
+    createdAt: new Date().toISOString(),
+    importedAt: new Date().toISOString(),
+  };
+
+  try {
+    _fs.mkdirSync(_path.dirname(CREDENTIALS_FILE), { recursive: true, mode: 0o700 });
+    _fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  } catch (err) {
+    return { ok: false, error: `Could not save credentials: ${err.message}` };
+  }
+
+  // Update env vars for current process
+  process.env.PB_AGENT_ID = agentId;
+  process.env.PB_AGENT_SECRET = agentSecret;
+
+  console.log(`[pets-browser] Credentials imported and saved for agentId: ${agentId}`);
+  return { ok: true, agentId };
 }
 
 // ─── SERVICE CREDENTIALS ──────────────────────────────────────────────────────
@@ -473,6 +540,35 @@ async function getCredentials() {
     }
 
     const data = await resp.json();
+
+    // Handle secret rotation: server rotates the secret on every /credentials call.
+    // Save the new secret to disk and update process env so that makeProxy() uses it.
+    if (data.newAgentSecret && data.newAgentToken) {
+      const existingFile = loadAgentCredentials();
+      const rotatedCreds = {
+        agentId: resolveAgentCredentials()?.agentId,
+        agentSecret: data.newAgentSecret,
+        rotatedAt: new Date().toISOString(),
+      };
+      // Preserve recoveryCode if it exists in the file
+      if (existingFile?.recoveryCode) {
+        rotatedCreds.recoveryCode = existingFile.recoveryCode;
+      }
+
+      try {
+        _fs.mkdirSync(_path.dirname(CREDENTIALS_FILE), { recursive: true, mode: 0o700 });
+        _fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(rotatedCreds, null, 2), { mode: 0o600 });
+      } catch (_) {
+        // Best effort — if save fails, the previous secret still works for one more rotation
+      }
+
+      // Update process env so makeProxy() picks up the new secret
+      process.env.PB_AGENT_TOKEN = data.newAgentToken;
+      if (rotatedCreds.agentId) {
+        process.env.PB_AGENT_ID = rotatedCreds.agentId;
+      }
+      process.env.PB_AGENT_SECRET = data.newAgentSecret;
+    }
 
     // Update managed proxy access permission.
     // sessionGranted=true  → server granted a managed proxy session (trial or subscription).
@@ -1027,7 +1123,7 @@ async function pasteIntoEditor(page, editorSelector, text) {
 
 module.exports = {
   // Main
-  launchBrowser, closeBrowser, getCredentials, autoRegisterAgent,
+  launchBrowser, closeBrowser, getCredentials, importCredentials,
 
   // Human-like interaction
   humanClick, humanMouseMove, humanType, humanScroll, humanRead,

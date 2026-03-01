@@ -169,6 +169,18 @@ await browser.close();
 
 ## API Reference
 
+### `importCredentials(agentId, agentSecret)`
+
+Save user-provided agent credentials to disk. Use when transferring an existing account to a new machine.
+
+```javascript
+const { importCredentials } = require('pets-browser/scripts/browser');
+const result = importCredentials('your-uuid', 'your-secret');
+// { ok: true, agentId: 'your-uuid' }
+```
+
+### `launchBrowser(opts)`
+
 ### `launchBrowser(opts)`
 
 Launch a stealth Chromium browser with residential proxy.

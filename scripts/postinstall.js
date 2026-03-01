@@ -307,6 +307,16 @@ async function resolveCredentials() {
     return fromPrompt;
   }
 
+  // Security: if the credentials directory already exists, an agent was
+  // previously registered. Refuse to silently generate new ones.
+  if (fs.existsSync(CREDENTIALS_DIR) || fs.existsSync(CREDENTIALS_FILE)) {
+    console.error('[pets-browser] Agent account already exists. Cannot generate new credentials.');
+    console.error('  Provide existing credentials via:');
+    console.error('    PB_AGENT_CREDENTIALS=<agentId>:<agentSecret>');
+    console.error('  Or paste them when prompted above.');
+    process.exit(1);
+  }
+
   return {
     agentId: generateAgentId(),
     agentSecret: generateAgentSecret(),
