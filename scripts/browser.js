@@ -234,7 +234,99 @@ const DEFAULT_API_URL = 'https://api.clawpets.io/pets-browser/v1';
 
 const CREDENTIALS_FILE = _path.join(_os.homedir(), '.pets-browser', 'agent-credentials.json');
 const PROFILES_DIR = _path.join(_os.homedir(), '.pets-browser', 'profiles');
+const LOGS_DIR    = _path.join(_os.homedir(), '.pets-browser', 'logs');
 const DEFAULT_PROFILE_NAME = (process.env.PB_PROFILE || 'default').trim() || 'default';
+const LOG_LEVELS  = ['off', 'actions', 'verbose'];
+const MAX_LOG_SESSIONS = 50;
+
+// ─── ACTION LOGGER ───────────────────────────────────────────────────────────
+
+class ActionLogger {
+  /**
+   * @param {string} sessionId  — unique session identifier
+   * @param {string} level      — 'off' | 'actions' | 'verbose'
+   */
+  constructor(sessionId, level = 'actions') {
+    this.sessionId = sessionId;
+    this.level = LOG_LEVELS.includes(level) ? level : 'actions';
+    this.startedAt = new Date().toISOString();
+    if (this.level === 'off') {
+      this.logFile = null;
+      return;
+    }
+    _fs.mkdirSync(LOGS_DIR, { recursive: true });
+    this.logFile = _path.join(LOGS_DIR, `${sessionId}.jsonl`);
+    this._rotate();
+  }
+
+  /** Append a structured log entry. */
+  log(action, detail = {}) {
+    if (!this.logFile) return;
+    const record = { ts: new Date().toISOString(), action, ...detail };
+    try { _fs.appendFileSync(this.logFile, JSON.stringify(record) + '\n'); } catch (_) {}
+  }
+
+  /** Agent reasoning — only recorded at verbose level. */
+  note(message) {
+    if (this.level !== 'verbose') return;
+    this.log('note', { message });
+  }
+
+  /** Return all log entries as an array. */
+  getLog() {
+    if (!this.logFile || !_fs.existsSync(this.logFile)) return [];
+    try {
+      return _fs.readFileSync(this.logFile, 'utf-8')
+        .trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    } catch (_) { return []; }
+  }
+
+  /** Keep only the newest MAX_LOG_SESSIONS log files. */
+  _rotate() {
+    try {
+      if (!_fs.existsSync(LOGS_DIR)) return;
+      const files = _fs.readdirSync(LOGS_DIR)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => ({ name: f, mtime: _fs.statSync(_path.join(LOGS_DIR, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      for (const f of files.slice(MAX_LOG_SESSIONS)) {
+        _fs.unlinkSync(_path.join(LOGS_DIR, f));
+      }
+    } catch (_) {}
+  }
+}
+
+// ─── LOG HELPERS ─────────────────────────────────────────────────────────────
+
+/** Get the page URL without throwing. */
+function _safeUrl(page) {
+  try { return page.url(); } catch (_) { return ''; }
+}
+
+/** Strip non-serializable args (page object) and mask passwords. */
+function _sanitizeArgs(actionName, args) {
+  const clean = [];
+  for (const a of args) {
+    if (a && typeof a === 'object' && typeof a.goto === 'function') continue; // skip page
+    if (typeof a === 'string' && a.length > 500) { clean.push(a.slice(0, 500) + '…'); continue; }
+    clean.push(a);
+  }
+  // mask text in humanType if selector hints at password
+  if (actionName === 'humanType' && clean.length >= 3) {
+    const sel = String(clean[1] || '').toLowerCase();
+    if (sel.includes('pass') || sel.includes('secret') || sel.includes('token')) {
+      clean[2] = '***';
+    }
+  }
+  return clean;
+}
+
+/** Truncate a value for logging. */
+function _truncate(val, max = 500) {
+  if (val == null) return val;
+  const s = typeof val === 'string' ? val : JSON.stringify(val);
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
 
 // Active browser instances keyed by profile name (for reuse mode)
 // Value: { browser, ctx, proxyEnabled }
@@ -686,6 +778,112 @@ async function humanRead(page, minMs = 1500, maxMs = 4000) {
   if (Math.random() < 0.3) await humanScroll(page, 'down', rand(50, 150));
 }
 
+// ─── BATCH ACTIONS ──────────────────────────────────────────────────────────
+// Inspired by PinchTab's /actions endpoint (internal/handlers/actions.go).
+// Execute multiple actions sequentially with shared error handling, reducing
+// LLM round-trips for multi-step flows (form filling, login, checkout).
+
+/**
+ * Execute multiple actions sequentially in a single call.
+ *
+ * Each action descriptor: { action, selector, text, value, key, ms, options }
+ *   action: 'click' | 'fill' | 'type' | 'press' | 'hover' | 'scroll' | 'select' |
+ *           'focus' | 'humanClick' | 'humanType' | 'wait' | 'waitForSelector' | 'snapshot'
+ *
+ * @param {import('playwright').Page} page
+ * @param {Array<Object>} actions - Array of action descriptors
+ * @param {Object} [opts]
+ * @param {boolean} [opts.stopOnError=false] - Halt on first failure or continue
+ * @param {number} [opts.delayBetween=50] - ms delay between actions for realism
+ * @returns {Promise<{results: Array<{index: number, success: boolean, result?: any, error?: string}>, total: number, successful: number, failed: number}>}
+ */
+async function batchActions(page, actions, opts = {}) {
+  const { stopOnError = false, delayBetween = 50 } = opts;
+  const results = [];
+  let successful = 0;
+  let failed = 0;
+
+  for (let i = 0; i < actions.length; i++) {
+    const act = actions[i];
+    try {
+      let result;
+      switch (act.action) {
+        case 'click':
+          await page.click(act.selector, act.options);
+          result = { clicked: act.selector };
+          break;
+        case 'fill':
+          await page.fill(act.selector, act.text || act.value || '');
+          result = { filled: act.selector };
+          break;
+        case 'type':
+          await page.type(act.selector, act.text || '', act.options);
+          result = { typed: act.selector };
+          break;
+        case 'press':
+          await page.press(act.selector || 'body', act.key);
+          result = { pressed: act.key };
+          break;
+        case 'hover':
+          await page.hover(act.selector, act.options);
+          result = { hovered: act.selector };
+          break;
+        case 'select':
+          await page.selectOption(act.selector, act.value);
+          result = { selected: act.value };
+          break;
+        case 'scroll':
+          await page.evaluate(({ x, y }) => window.scrollBy(x || 0, y || 300), act.options || {});
+          result = { scrolled: true };
+          break;
+        case 'focus':
+          await page.focus(act.selector);
+          result = { focused: act.selector };
+          break;
+        case 'wait':
+          await page.waitForTimeout(act.ms || 1000);
+          result = { waited: act.ms || 1000 };
+          break;
+        case 'waitForSelector':
+          await page.waitForSelector(act.selector, act.options);
+          result = { found: act.selector };
+          break;
+        case 'humanClick': {
+          const el = await page.$(act.selector);
+          if (!el) throw new Error('Element not found: ' + act.selector);
+          const box = await el.boundingBox();
+          if (!box) throw new Error('Element not visible: ' + act.selector);
+          await humanClick(page, box.x + box.width / 2, box.y + box.height / 2);
+          result = { humanClicked: act.selector };
+          break;
+        }
+        case 'humanType':
+          await humanType(page, act.selector, act.text || '');
+          result = { humanTyped: act.selector };
+          break;
+        case 'snapshot':
+          result = { snapshot: await snapshot(page, act.options || {}) };
+          break;
+        default:
+          throw new Error('Unknown action: ' + act.action);
+      }
+      results.push({ index: i, success: true, result });
+      successful++;
+    } catch (err) {
+      results.push({ index: i, success: false, error: err.message });
+      failed++;
+      if (stopOnError) break;
+    }
+
+    // Delay between actions for realism (skip after last action)
+    if (i < actions.length - 1 && delayBetween > 0) {
+      await sleep(delayBetween);
+    }
+  }
+
+  return { results, total: actions.length, successful, failed };
+}
+
 // ─── 2CAPTCHA SOLVER ──────────────────────────────────────────────────────────
 
 async function solveCaptcha(page, opts = {}) {
@@ -903,14 +1101,282 @@ async function screenshotAndReport(pg, message, opts = {}) {
   return { message, screenshot, mimeType: 'image/png' };
 }
 
-function buildResult(browser, ctx, page) {
+// ── PAGE PROXY ──────────────────────────────────────────────────────────────
+// Intercepts ALL page & locator method calls for comprehensive logging.
+// The agent uses Playwright chains like page.getByRole('button').click() —
+// without a Proxy these calls are invisible to our logger.
+
+/**
+ * Methods whose calls we log at "actions" level (user-visible actions).
+ * Everything else is logged only at "verbose" level.
+ */
+const ACTION_METHODS = new Set([
+  // navigation
+  'goto', 'goBack', 'goForward', 'reload',
+  // interaction
+  'click', 'dblclick', 'fill', 'type', 'press', 'check', 'uncheck', 'selectOption',
+  'setInputFiles', 'tap', 'hover', 'focus', 'dragTo', 'scrollIntoViewIfNeeded',
+  // waiting
+  'waitForSelector', 'waitForNavigation', 'waitForURL', 'waitForLoadState', 'waitForTimeout',
+  // locator creation (we log the chain, e.g. getByRole → click)
+  'getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByAltText',
+  'getByTitle', 'getByTestId', 'locator', 'first', 'last', 'nth',
+]);
+
+/**
+ * Methods that return a new Locator and need to be wrapped recursively
+ * so the whole chain is captured: page.getByRole('button', { name: 'Submit' }).click()
+ */
+const LOCATOR_RETURNING = new Set([
+  'getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByAltText',
+  'getByTitle', 'getByTestId', 'locator', 'first', 'last', 'nth',
+  'filter', 'and', 'or',
+]);
+
+/**
+ * Properties / methods that should NOT be proxied (internal Playwright, symbols, etc.)
+ */
+const PROXY_SKIP = new Set([
+  'then', 'catch', 'finally', // thenable checks
+  'toJSON', 'toString', 'valueOf', 'inspect',
+  'constructor', 'prototype',
+]);
+
+/**
+ * Serialize a locator call argument for logging.
+ * Handles role names, { name: ... } options, regex, etc.
+ */
+function _serializeLocatorArg(arg) {
+  if (arg == null) return arg;
+  if (arg instanceof RegExp) return arg.toString();
+  if (typeof arg === 'string') return arg.length > 200 ? arg.slice(0, 200) + '…' : arg;
+  if (typeof arg === 'number' || typeof arg === 'boolean') return arg;
+  if (typeof arg === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(arg)) {
+      if (typeof v === 'function') continue; // skip callbacks
+      out[k] = _serializeLocatorArg(v);
+    }
+    return out;
+  }
+  return String(arg).slice(0, 100);
+}
+
+/**
+ * Create a logging Proxy around a Playwright Page or Locator.
+ *
+ * @param {object} target   — Playwright Page or Locator instance
+ * @param {ActionLogger} logger
+ * @param {Page} rawPage    — the unwrapped page (for _safeUrl)
+ * @param {string[]} chain  — accumulated method chain, e.g. ['getByRole("button")', 'first()']
+ */
+function _createLoggingProxy(target, logger, rawPage, chain = []) {
+  if (!target || typeof target !== 'object') return target;
+
+  return new Proxy(target, {
+    get(obj, prop, receiver) {
+      // Symbols, internal props — pass through
+      if (typeof prop === 'symbol') return Reflect.get(obj, prop, receiver);
+      if (PROXY_SKIP.has(prop)) return Reflect.get(obj, prop, receiver);
+
+      const value = Reflect.get(obj, prop, receiver);
+      if (typeof value !== 'function') return value;
+
+      // Determine if this method is worth logging
+      const isAction = ACTION_METHODS.has(prop);
+      const isLocatorReturning = LOCATOR_RETURNING.has(prop);
+      const shouldLog = logger.level === 'verbose' || isAction;
+
+      if (!shouldLog && !isLocatorReturning) {
+        // Not interesting — return bound original
+        return value.bind(obj);
+      }
+
+      // Return a wrapper function
+      return function proxyWrapper(...args) {
+        const prettyArgs = args.map(_serializeLocatorArg);
+        const callLabel = `${prop}(${prettyArgs.map(a => JSON.stringify(a)).join(', ')})`;
+        const fullChain = [...chain, callLabel];
+
+        // If this method returns a Locator, wrap the result recursively
+        if (isLocatorReturning) {
+          const result = value.apply(obj, args);
+          if (shouldLog) {
+            logger.log('locator', { chain: fullChain.join(' → '), url: _safeUrl(rawPage) });
+          }
+          // Wrap the returned locator so subsequent .click() / .fill() are also logged
+          return _createLoggingProxy(result, logger, rawPage, fullChain);
+        }
+
+        // Action method — log before and after
+        const url = _safeUrl(rawPage);
+        const entry = { method: prop, args: prettyArgs, chain: fullChain.join(' → '), url };
+
+        // If the result is a promise (async method), handle it
+        let result;
+        try {
+          result = value.apply(obj, args);
+        } catch (err) {
+          logger.log(prop + '_error', { ...entry, error: err.message });
+          throw err;
+        }
+
+        // Handle both sync and async returns
+        if (result && typeof result.then === 'function') {
+          return result.then(
+            (res) => {
+              const detail = { ...entry, ok: true };
+              // For some methods, capture return value
+              if (prop === 'textContent' || prop === 'innerText' || prop === 'innerHTML' ||
+                  prop === 'inputValue' || prop === 'getAttribute' || prop === 'count' ||
+                  prop === 'isVisible' || prop === 'isEnabled' || prop === 'isChecked') {
+                detail.result = _truncate(res);
+              }
+              if (prop === 'goto' && res) {
+                detail.status = typeof res.status === 'function' ? res.status() : undefined;
+              }
+              logger.log(prop, detail);
+              return res;
+            },
+            (err) => {
+              logger.log(prop + '_error', { ...entry, error: err.message });
+              throw err;
+            }
+          );
+        }
+
+        // Sync result
+        if (shouldLog) {
+          logger.log(prop, { ...entry, ok: true });
+        }
+        return result;
+      };
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildResult(browser, ctx, page, logger) {
+  // ── Create logging proxy for the page object ──
+  const rawPage = page;  // keep unwrapped reference for internal use
+  const proxiedPage = logger.level !== 'off'
+    ? _createLoggingProxy(page, logger, rawPage)
+    : page;
+
+  // ── Subscribe to page events for passive logging ──
+  if (logger.level !== 'off') {
+    rawPage.on('framenavigated', (frame) => {
+      if (frame === rawPage.mainFrame()) {
+        logger.log('navigated', { url: frame.url() });
+      }
+    });
+    rawPage.on('popup', (popup) => {
+      logger.log('popup', { url: _safeUrl(popup) });
+    });
+    rawPage.on('dialog', (dialog) => {
+      logger.log('dialog', { type: dialog.type(), message: _truncate(dialog.message(), 300) });
+    });
+    rawPage.on('download', (download) => {
+      logger.log('download', { filename: download.suggestedFilename(), url: download.url() });
+    });
+    rawPage.on('pageerror', (err) => {
+      logger.log('page_error', { error: err.message });
+    });
+  }
+  if (logger.level === 'verbose') {
+    rawPage.on('console', (msg) => {
+      if (msg.type() === 'error' || msg.type() === 'warning') {
+        logger.log('console', { type: msg.type(), text: _truncate(msg.text(), 300) });
+      }
+    });
+    rawPage.on('response', (resp) => {
+      const status = resp.status();
+      if (status >= 400) {
+        logger.log('http_error', { url: resp.url(), status });
+      }
+    });
+  }
+
+  // ── Wrap human* functions ──
+  const wrap = (name, fn) => {
+    if (logger.level === 'off') return fn;
+    return async (...args) => {
+      const url = _safeUrl(rawPage);
+      try {
+        const result = await fn(...args);
+        logger.log(name, { args: _sanitizeArgs(name, args), url, ok: true });
+        return result;
+      } catch (err) {
+        logger.log(name, { args: _sanitizeArgs(name, args), url, error: err.message });
+        throw err;
+      }
+    };
+  };
+
+  // ── Wrap observation functions ──
+  const wrappedSnapshot = async (opts) => {
+    const result = await snapshot(rawPage, opts);
+    if (logger.level !== 'off') {
+      logger.log('snapshot', { selector: opts?.selector || 'body', interactiveOnly: opts?.interactiveOnly || false, length: result.length, url: _safeUrl(rawPage) });
+    }
+    return result;
+  };
+
+  const wrappedDumpInteractive = async (opts) => {
+    const result = await dumpInteractiveElements(rawPage, opts);
+    if (logger.level !== 'off') {
+      logger.log('dumpInteractiveElements', { count: result.length, url: _safeUrl(rawPage) });
+    }
+    return result;
+  };
+
+  const wrappedScreenshot = async (opts) => {
+    const result = await takeScreenshot(rawPage, opts);
+    if (logger.level !== 'off') {
+      logger.log('screenshot', { url: _safeUrl(rawPage) });
+    }
+    return result;
+  };
+
+  const wrappedScreenshotAndReport = async (message, opts) => {
+    const result = await screenshotAndReport(rawPage, message, opts);
+    if (logger.level !== 'off') {
+      logger.log('screenshotAndReport', { message: _truncate(message, 200), url: _safeUrl(rawPage) });
+    }
+    return result;
+  };
+
   return {
-    browser, ctx, page,
-    humanClick, humanMouseMove, humanType, humanScroll, humanRead,
-    solveCaptcha: (captchaOpts) => solveCaptcha(page, captchaOpts),
-    takeScreenshot: (opts) => takeScreenshot(page, opts),
-    screenshotAndReport: (message, opts) => screenshotAndReport(page, message, opts),
+    browser, ctx,
+    page: proxiedPage,
+    logger,
+    humanClick:     wrap('humanClick', humanClick),
+    humanMouseMove: wrap('humanMouseMove', humanMouseMove),
+    humanType:      wrap('humanType', humanType),
+    humanScroll:    wrap('humanScroll', humanScroll),
+    humanRead:      wrap('humanRead', humanRead),
+    solveCaptcha:   wrap('solveCaptcha', (captchaOpts) => solveCaptcha(rawPage, captchaOpts)),
+    takeScreenshot: wrappedScreenshot,
+    screenshotAndReport: wrappedScreenshotAndReport,
+
+    // Observation layer — use these instead of page.textContent()
+    snapshot:               wrappedSnapshot,
+    dumpInteractiveElements: wrappedDumpInteractive,
+
+    // Text extraction — clean readable text from pages
+    extractText:    wrap('extractText', (opts) => extractText(rawPage, opts)),
+
+    // Cookie management — get/set/clear cookies
+    getCookies:     wrap('getCookies', (urls) => getCookies(ctx, urls)),
+    setCookies:     wrap('setCookies', (cookies) => setCookies(ctx, cookies)),
+    clearCookies:   wrap('clearCookies', () => clearCookies(ctx)),
+
+    // Batch actions — execute multiple actions in one call
+    batchActions:   wrap('batchActions', (actions, opts) => batchActions(rawPage, actions, opts)),
+
     sleep, rand,
+    getSessionLog:  () => logger.getLog(),
   };
 }
 
@@ -927,8 +1393,10 @@ function buildResult(browser, ctx, page) {
  *                                   Default: "default". Pass null for ephemeral.
  * @param {boolean} opts.reuse     — Reuse running browser for this profile. Proxy mode must match
  *                                   the existing live context. Default: true
+ * @param {string}  opts.logLevel  — 'off' | 'actions' | 'verbose'. Default: 'actions' (env PB_LOG_LEVEL)
+ * @param {string}  opts.task      — User's task / prompt to record in the session log. Optional.
  *
- * @returns {{ browser, ctx, page, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, sleep, rand }}
+ * @returns {{ browser, ctx, page, logger, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, takeScreenshot, screenshotAndReport, snapshot, dumpInteractiveElements, sleep, rand, getSessionLog }}
  */
 async function launchBrowser(opts = {}) {
   const {
@@ -939,11 +1407,17 @@ async function launchBrowser(opts = {}) {
     session  = null,
     profile  = DEFAULT_PROFILE_NAME,
     reuse    = true,
+    logLevel = null,
+    task     = null,
   } = opts;
   const normalizedProfile = typeof profile === 'string' ? profile.trim() : profile;
   const profileName = normalizedProfile === '' ? DEFAULT_PROFILE_NAME : normalizedProfile;
 
-  const cty = country || process.env.PB_PROXY_COUNTRY || 'us';
+  const cty   = country || process.env.PB_PROXY_COUNTRY || 'us';
+  const level = logLevel || process.env.PB_LOG_LEVEL || 'actions';
+  const logger = new ActionLogger(_crypto.randomUUID(), level);
+  logger.log('launch', { country: cty, mobile, profile: profileName, useProxy, headless, logLevel: level });
+  if (task) logger.log('task', { prompt: typeof task === 'string' ? task : JSON.stringify(task) });
 
   // ── Reuse: return existing browser if alive ──
   // Reuse is only safe when requested proxy mode matches the live context.
@@ -965,7 +1439,8 @@ async function launchBrowser(opts = {}) {
         active.ctx.pages(); // throws if context is dead
         const page = await active.ctx.newPage();
         console.log(`[pets-browser] Reusing browser for profile "${profileName}"`);
-        return buildResult(active.browser, active.ctx, page);
+        logger.log('reuse', { profile: profileName });
+        return buildResult(active.browser, active.ctx, page, logger);
       } catch (_) {
         // Context died — remove and fall through to fresh launch
         _activeBrowsers.delete(profileName);
@@ -1036,7 +1511,7 @@ async function launchBrowser(opts = {}) {
     await applyStealthScripts(ctx, mobile, meta.locale);
     const page = ctx.pages()[0] || await ctx.newPage();
     const browser = ctx.browser();
-    const result = buildResult(browser, ctx, page);
+    const result = buildResult(browser, ctx, page, logger);
 
     if (reuse) {
       _activeBrowsers.set(profileName, { browser, ctx, proxyEnabled: Boolean(proxy) });
@@ -1056,7 +1531,7 @@ async function launchBrowser(opts = {}) {
   await applyStealthScripts(ctx, mobile, meta.locale);
   const page = await ctx.newPage();
 
-  return buildResult(browser, ctx, page);
+  return buildResult(browser, ctx, page, logger);
 }
 
 /**
@@ -1113,7 +1588,34 @@ async function shadowClickButton(page, buttonText) {
   }, buttonText);
 }
 
-async function dumpInteractiveElements(page) {
+/**
+ * List all interactive elements on the page using the accessibility tree.
+ * Returns a compact YAML string with only buttons, inputs, links, etc.
+ * Falls back to DOM querySelectorAll if ariaSnapshot is unavailable.
+ *
+ * @param {import('playwright').Page} page
+ * @param {Object} [opts]
+ * @param {string} [opts.selector='body'] — Scope to a region
+ * @returns {Promise<string>} YAML accessibility tree of interactive elements
+ */
+async function dumpInteractiveElements(page, opts = {}) {
+  try {
+    return await snapshot(page, {
+      selector: opts.selector || 'body',
+      interactiveOnly: true,
+    });
+  } catch (_) {
+    // Fallback: original DOM-based approach for older Playwright versions
+    return JSON.stringify(await _dumpInteractiveElementsDOM(page), null, 2);
+  }
+}
+
+/**
+ * Legacy DOM-based interactive element dump. Used as fallback when
+ * ariaSnapshot is unavailable (Playwright < 1.49).
+ * @private
+ */
+async function _dumpInteractiveElementsDOM(page) {
   return page.evaluate(() => {
     const res = [];
     function collect(root) {
@@ -1127,6 +1629,219 @@ async function dumpInteractiveElements(page) {
     collect(document);
     return res;
   });
+}
+
+// ─── OBSERVATION LAYER ───────────────────────────────────────────────────────
+// Use snapshot() instead of page.textContent() — 90-95% fewer tokens for LLMs.
+// The accessibility tree gives the agent structured, semantic understanding of
+// what's on the page instead of a flat wall of text.
+
+/**
+ * Interactive ARIA roles that represent elements the user can interact with.
+ * Used by filterInteractiveOnly() to strip decorative/static nodes.
+ */
+const INTERACTIVE_ROLES = new Set([
+  'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox',
+  'listbox', 'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+  'tab', 'switch', 'slider', 'spinbutton', 'searchbox', 'treeitem',
+]);
+
+/**
+ * Post-process ariaSnapshot YAML to keep only interactive elements
+ * and their ancestor structure. Strips decorative/static nodes
+ * (headings, paragraphs, images, generic containers without interactive children).
+ *
+ * Two-pass algorithm:
+ *   Pass 1: Scan all lines, mark lines whose role is in INTERACTIVE_ROLES.
+ *   Pass 2: For each marked line, walk up the indent hierarchy to mark all
+ *           ancestor lines so the structural tree remains valid.
+ *   Emit:   Output only marked lines.
+ *
+ * @param {string} yaml — Raw ariaSnapshot YAML
+ * @returns {string} Filtered YAML with only interactive elements and their ancestors
+ */
+function filterInteractiveOnly(yaml) {
+  const lines = yaml.split('\n');
+  const keep = new Array(lines.length).fill(false);
+  const indents = [];
+
+  // Pass 1: find interactive lines and record indent levels
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trimStart();
+    const indent = line.length - trimmed.length;
+    indents.push(indent);
+
+    if (!trimmed) continue;
+    // Extract role: "- role ..." or "- role:" (with children)
+    const match = trimmed.match(/^-\s+(\w+)/);
+    if (match && INTERACTIVE_ROLES.has(match[1])) {
+      keep[i] = true;
+    }
+  }
+
+  // Pass 2: for each kept line, mark all ancestors (lines with smaller indent above it)
+  for (let i = 0; i < lines.length; i++) {
+    if (!keep[i]) continue;
+    const myIndent = indents[i];
+    // Walk backwards to find ancestors at each decreasing indent level
+    let targetIndent = myIndent;
+    for (let j = i - 1; j >= 0 && targetIndent > 0; j--) {
+      if (indents[j] < targetIndent && lines[j].trim()) {
+        keep[j] = true;
+        targetIndent = indents[j];
+      }
+    }
+  }
+
+  const result = lines.filter((_, i) => keep[i]);
+  // If filtering removed everything, return original (safety)
+  return result.length > 0 ? result.join('\n') : yaml;
+}
+
+/**
+ * Capture a compact accessibility tree snapshot of the page or a region.
+ * Returns a YAML string with roles, names, and attributes — structured
+ * semantic understanding of the page that LLMs can reason about.
+ *
+ * **Use this INSTEAD of page.textContent().**
+ *
+ * @param {import('playwright').Page} page
+ * @param {Object} [opts]
+ * @param {string} [opts.selector='body']       — CSS selector to scope snapshot
+ * @param {boolean} [opts.interactiveOnly=false] — Keep only interactive elements (buttons, inputs, links)
+ * @param {number} [opts.maxLength=20000]        — Truncate result to N characters
+ * @param {number} [opts.timeout=5000]           — Playwright timeout in ms
+ * @returns {Promise<string>} YAML accessibility tree
+ */
+async function snapshot(page, opts = {}) {
+  const {
+    selector = 'body',
+    interactiveOnly = false,
+    maxLength = 20000,
+    timeout = 5000,
+  } = opts;
+
+  const locator = page.locator(selector).first();
+  let yaml = await locator.ariaSnapshot({ timeout });
+
+  if (interactiveOnly) {
+    yaml = filterInteractiveOnly(yaml);
+  }
+
+  if (yaml.length > maxLength) {
+    yaml = yaml.slice(0, maxLength) + '\n... [truncated]';
+  }
+
+  return yaml;
+}
+
+// ─── TEXT EXTRACTION ────────────────────────────────────────────────────────
+// Inspired by PinchTab's /text endpoint (internal/handlers/text.go).
+// Extracts clean readable text from pages, stripping navigation/ads/noise.
+
+/**
+ * Extract clean text from the page using readability heuristics.
+ *
+ * Two modes:
+ *   - 'readability' (default): Finds the main content area (<article>, <main>,
+ *     [role="main"]), or falls back to cloning <body> and stripping noise elements
+ *     (nav, footer, ads, modals, cookie banners, etc.).
+ *   - 'raw': Returns document.body.innerText as-is.
+ *
+ * @param {import('playwright').Page} page
+ * @param {Object} [opts]
+ * @param {'readability'|'raw'} [opts.mode='readability'] - Extraction mode
+ * @param {number} [opts.maxChars] - Truncate text to N characters
+ * @returns {Promise<{url: string, title: string, text: string, truncated: boolean}>}
+ */
+async function extractText(page, opts = {}) {
+  const { mode = 'readability', maxChars } = opts;
+  const url = page.url();
+  const title = await page.title();
+
+  let text;
+  if (mode === 'raw') {
+    text = await page.evaluate(() => document.body.innerText);
+  } else {
+    text = await page.evaluate(() => {
+      // Try semantic containers first
+      const selectors = ['article', '[role="main"]', 'main'];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.innerText.trim().length > 100) {
+          return el.innerText.replace(/\n{3,}/g, '\n\n').trim();
+        }
+      }
+      // Fallback: clone body and strip noise elements
+      const clone = document.body.cloneNode(true);
+      const noiseSelectors = [
+        'nav', 'footer', 'aside', 'header',
+        '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+        '.ad', '.ads', '.advertisement', '.sidebar',
+        '.cookie-banner', '.cookie-consent', '.popup', '.modal',
+        '.social-share', '.comments', '.related-posts',
+        'script', 'style', 'noscript', 'svg', 'iframe',
+        '[hidden]', '[aria-hidden="true"]',
+      ];
+      for (const sel of noiseSelectors) {
+        clone.querySelectorAll(sel).forEach(el => el.remove());
+      }
+      return clone.innerText.replace(/\n{3,}/g, '\n\n').trim();
+    });
+  }
+
+  let truncated = false;
+  if (maxChars && text.length > maxChars) {
+    text = text.slice(0, maxChars);
+    truncated = true;
+  }
+
+  return { url, title, text, truncated };
+}
+
+// ─── COOKIE MANAGEMENT ──────────────────────────────────────────────────────
+// Inspired by PinchTab's /cookies endpoint (internal/handlers/cookies.go).
+// Wraps Playwright's BrowserContext cookie API with logging-friendly interface.
+
+/**
+ * Get cookies for the current browser context.
+ *
+ * @param {import('playwright').BrowserContext} ctx - Playwright browser context
+ * @param {string|string[]} [urls] - Filter by URL(s). If omitted, returns all cookies.
+ * @returns {Promise<Array<{name: string, value: string, domain: string, path: string, secure: boolean, httpOnly: boolean, sameSite: string, expires: number}>>}
+ */
+async function getCookies(ctx, urls) {
+  if (urls) {
+    return ctx.cookies(Array.isArray(urls) ? urls : [urls]);
+  }
+  return ctx.cookies();
+}
+
+/**
+ * Set cookies on the browser context.
+ *
+ * Each cookie must have at least `name`, `value`, and either `url` or `domain`+`path`.
+ *
+ * @param {import('playwright').BrowserContext} ctx - Playwright browser context
+ * @param {Array<{name: string, value: string, url?: string, domain?: string, path?: string, secure?: boolean, httpOnly?: boolean, sameSite?: 'Strict'|'Lax'|'None', expires?: number}>} cookies
+ * @returns {Promise<{set: number, total: number}>}
+ */
+async function setCookies(ctx, cookies) {
+  const cookieArray = Array.isArray(cookies) ? cookies : [cookies];
+  await ctx.addCookies(cookieArray);
+  return { set: cookieArray.length, total: cookieArray.length };
+}
+
+/**
+ * Clear all cookies from the browser context.
+ *
+ * @param {import('playwright').BrowserContext} ctx
+ * @returns {Promise<{cleared: true}>}
+ */
+async function clearCookies(ctx) {
+  await ctx.clearCookies();
+  return { cleared: true };
 }
 
 // ─── RICH TEXT EDITOR UTILITIES ───────────────────────────────────────────────
@@ -1150,6 +1865,37 @@ async function pasteIntoEditor(page, editorSelector, text) {
   await sleep(500);
 }
 
+// ─── SESSION LOG QUERIES ─────────────────────────────────────────────────────
+
+/**
+ * List all session log files, newest first.
+ * @returns {Array<{ sessionId: string, file: string, mtime: string, size: number }>}
+ */
+function getSessionLogs() {
+  if (!_fs.existsSync(LOGS_DIR)) return [];
+  return _fs.readdirSync(LOGS_DIR)
+    .filter(f => f.endsWith('.jsonl'))
+    .map(f => {
+      const full = _path.join(LOGS_DIR, f);
+      const stat = _fs.statSync(full);
+      return { sessionId: f.replace('.jsonl', ''), file: full, mtime: stat.mtime.toISOString(), size: stat.size };
+    })
+    .sort((a, b) => b.mtime.localeCompare(a.mtime));
+}
+
+/**
+ * Read a specific session log by ID.
+ * @param {string} sessionId
+ * @returns {Array<Object>}
+ */
+function getSessionLog(sessionId) {
+  const file = _path.join(LOGS_DIR, `${sessionId}.jsonl`);
+  if (!_fs.existsSync(file)) return [];
+  try {
+    return _fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+  } catch (_) { return []; }
+}
+
 // ─── EXPORTS ──────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -1165,14 +1911,29 @@ module.exports = {
   // Screenshots
   takeScreenshot, screenshotAndReport,
 
+  // Observation layer (accessibility tree)
+  snapshot, dumpInteractiveElements,
+
+  // Text extraction (readability)
+  extractText,
+
+  // Cookie management
+  getCookies, setCookies, clearCookies,
+
+  // Batch actions
+  batchActions,
+
   // Shadow DOM utilities
-  shadowQuery, shadowFill, shadowClickButton, dumpInteractiveElements,
+  shadowQuery, shadowFill, shadowClickButton,
 
   // Rich text editors
   pasteIntoEditor,
 
   // Internals (exposed for advanced users)
   makeProxy, buildDevice,
+
+  // Logging
+  getSessionLogs, getSessionLog,
 
   // Helpers
   sleep, rand, COUNTRY_META,

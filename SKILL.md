@@ -19,6 +19,83 @@ Use this skill whenever the agent needs to:
 
 **Always use this instead of raw Playwright/Puppeteer.** This skill handles anti-detection automatically.
 
+## Observation — how to read the page
+
+**ALWAYS use `snapshot()` instead of `page.textContent()`.** The snapshot returns a compact accessibility tree (2-5K tokens) instead of raw page text (50-100K tokens). This gives you structured, semantic understanding of the page — you can see what's a button, what's a text field, whether a form is filled or empty, and what you can interact with.
+
+### Reading the page
+
+```javascript
+// BAD — dumps ALL text as a flat wall of text, 50-100K tokens, no structure
+const text = await page.textContent('body');
+
+// GOOD — compact accessibility tree, 2-5K tokens, structured
+const tree = await snapshot();
+
+// BETTER — only interactive elements (buttons, inputs, links), 0.5-2K tokens
+const interactive = await snapshot({ interactiveOnly: true });
+
+// BEST — scoped to a specific region
+const formTree = await snapshot({ selector: 'form' });
+const mainContent = await snapshot({ selector: 'main' });
+```
+
+The snapshot output looks like:
+```yaml
+- navigation "Main":
+  - list:
+    - listitem:
+      - link "Home"
+- main:
+  - heading "Welcome" [level=1]
+  - textbox "Email" value=""
+  - textbox "Password"
+  - button "Sign in"
+```
+
+This tells you exactly what's on the page, what state it's in, and what you can interact with.
+
+### Observation workflow
+
+Before every action, follow this sequence:
+
+1. **Quick scan** — `await snapshot({ interactiveOnly: true })` to see what you can interact with
+2. **Read content** — `await snapshot({ selector: 'main' })` if you need to understand page structure
+3. **Read text** — `await extractText()` if you need clean readable text (menus, prices, articles)
+4. **Visual check** — `await takeScreenshot()` only if you need to see colors, layout, maps, or images
+5. **Act** — use semantic locators (see below), or `batchActions()` for multi-step flows
+
+### Targeting elements — use semantic locators
+
+**PREFER semantic locators over CSS selectors.** They're more resilient and match how the accessibility tree describes elements.
+
+```javascript
+// BAD — brittle CSS selectors that break when HTML changes
+await page.click('#login_field');
+await page.fill('input[name="email"]', 'user@example.com');
+
+// GOOD — semantic locators that match the snapshot output
+await page.getByLabel('Email').fill('user@example.com');
+await page.getByLabel('Password').fill('secret');
+await page.getByRole('button', { name: 'Sign in' }).click();
+
+// Also available:
+await page.getByPlaceholder('Search...').fill('query');
+await page.getByText('Welcome back').isVisible();
+await page.getByRole('link', { name: 'Home' }).click();
+await page.getByRole('checkbox', { name: 'Remember me' }).check();
+```
+
+When you see `- textbox "Email"` in the snapshot, use `page.getByRole('textbox', { name: 'Email' })`.
+When you see `- button "Submit"`, use `page.getByRole('button', { name: 'Submit' })`.
+
+### When to fall back to CSS selectors
+
+Only use CSS selectors when:
+- The element has no accessible name or role (rare in modern sites)
+- You need to target by `data-testid` or other test attributes
+- Shadow DOM elements not reachable by semantic locators (use `shadowFill`/`shadowClickButton`)
+
 ## Screenshot rules
 
 **ALWAYS attach a screenshot when communicating with the user.** The user cannot see the browser — you are their eyes. Every message to the user MUST include a screenshot. No exceptions.
@@ -120,12 +197,15 @@ That's it. No env vars needed. `launchBrowser()` will:
 2. Fetch managed proxy + CAPTCHA keys
 3. Launch stealth Chromium with residential proxy
 
-After first launch, show credentials to user:
-```javascript
-const creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8'));
-console.log(`agentId: ${creds.agentId}`);
-console.log(`agentSecret: ${creds.agentSecret}`);
-// Ask user to save these for future use / transfer
+After first launch, show credentials and support contacts to the user:
+```
+Your Pets Browser credentials:
+  agentId: <agentId>
+  agentSecret: <agentSecret>
+
+Save these for future use or transfer to another agent.
+
+If you run into any issues: [Discord](https://discord.com/invite/wtA85mJM) | [Telegram](https://t.me/+nPjZFg8PJc4zZTIy)
 ```
 
 ## Agent Credentials & Subscription
@@ -149,6 +229,29 @@ To transfer/recover on another agent, provide the same `agentId + agentSecret` d
 Backend rule: one `subscriptionId` can be linked to only one `agentId` at a time.
 
 To rotate a compromised secret, keep the same `agentId` and issue a new `agentSecret` (authorized by current secret or recovery code). Old secret is invalidated immediately.
+
+### Cancel subscription
+
+If the user asks to cancel their subscription, call the cancel endpoint:
+
+```javascript
+const creds = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf-8'));
+const token = `PB1.${creds.agentId}.${creds.agentSecret}`;
+const resp = await fetch(`${apiUrl}/cancel-subscription`, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${token}` },
+});
+const result = await resp.json();
+// { canceled: true, accessUntil: "2026-04-02T00:00:00Z", message: "..." }
+```
+
+Show the result to the user:
+```
+Your subscription has been canceled. Access remains until <accessUntil>.
+If you change your mind, you can resubscribe anytime.
+
+Need help? [Discord](https://discord.com/invite/wtA85mJM) | [Telegram](https://t.me/+nPjZFg8PJc4zZTIy)
+```
 
 ## Setup modes
 
@@ -223,8 +326,6 @@ const result = importCredentials('your-uuid', 'your-secret');
 
 ### `launchBrowser(opts)`
 
-### `launchBrowser(opts)`
-
 Launch a stealth Chromium browser with residential proxy.
 
 | Option | Type | Default | Description |
@@ -236,8 +337,10 @@ Launch a stealth Chromium browser with residential proxy.
 | `session` | string | random | Sticky session ID (same IP across requests) |
 | `profile` | string | `'default'` | Persistent profile name (`null` = ephemeral) |
 | `reuse` | boolean | `true` | Reuse running browser for this profile (new tab, same process) |
+| `logLevel` | string | `'actions'` | `'off'` \| `'actions'` \| `'verbose'`. Env: `PB_LOG_LEVEL` |
+| `task` | string | `null` | User's prompt / task description. Recorded in the session log for context. |
 
-Returns: `{ browser, ctx, page, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, takeScreenshot, screenshotAndReport, sleep, rand }`
+Returns: `{ browser, ctx, page, logger, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, takeScreenshot, screenshotAndReport, snapshot, dumpInteractiveElements, extractText, getCookies, setCookies, clearCookies, batchActions, sleep, rand, getSessionLog }`
 
 ### `solveCaptcha(page, opts)`
 
@@ -271,6 +374,89 @@ Take a screenshot and pair it with a message. Returns an object ready to attach 
 
 Returns: `{ message, screenshot, mimeType }` — screenshot is base64 PNG
 
+### `snapshot(page, opts)` / `snapshot(opts)` (from launchBrowser return)
+
+Capture a compact accessibility tree of the page. Returns YAML string.
+**Use this instead of `page.textContent()`.** See "Observation" section above.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `selector` | string | `'body'` | CSS selector to scope the snapshot |
+| `interactiveOnly` | boolean | `false` | Keep only interactive elements (buttons, inputs, links) |
+| `maxLength` | number | `20000` | Truncate output to N characters |
+| `timeout` | number | `5000` | Playwright timeout in ms |
+
+Returns: `string` (YAML accessibility tree)
+
+### `extractText(opts)` (from launchBrowser return) / `extractText(page, opts)`
+
+Extract clean readable text from the page, stripping navigation, ads, modals, and noise. Use when you need to READ the page content (menus, prices, articles) rather than interact with UI elements.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mode` | string | `'readability'` | `'readability'` strips noise, `'raw'` returns `body.innerText` |
+| `maxChars` | number | unlimited | Truncate text to N characters |
+
+Returns: `{ url, title, text, truncated }`
+
+```javascript
+// Read a restaurant menu
+const { text } = await extractText({ mode: 'readability' });
+// → "Pizza Menu\n\nMargherita\nClassic pizza with mozzarella...\nFrom 399 ₽\n\n..."
+
+// Raw mode for simple pages
+const { text: raw } = await extractText({ mode: 'raw', maxChars: 5000 });
+```
+
+**When to use `extractText()` vs `snapshot()`:**
+- `extractText()` — reading text content (menus, prices, articles, descriptions)
+- `snapshot()` — understanding page structure and finding interactive elements (buttons, inputs, links)
+
+### `getCookies(urls?)` / `setCookies(cookies)` / `clearCookies()`
+
+Manage browser cookies. Use for session persistence, login state checks, and cookie transfer between tasks.
+
+```javascript
+// Check if logged in
+const cookies = await getCookies('https://example.com');
+const hasAuth = cookies.some(c => c.name === 'session_id');
+
+// Set cookies (e.g., from a previous session)
+await setCookies([
+  { name: 'session_id', value: 'abc123', url: 'https://example.com' },
+  { name: 'lang', value: 'en', url: 'https://example.com' },
+]);
+
+// Clear all cookies (logout)
+await clearCookies();
+```
+
+### `batchActions(actions, opts)` (from launchBrowser return) / `batchActions(page, actions, opts)`
+
+Execute multiple actions sequentially in a single call. Reduces LLM round-trips for multi-step flows.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `stopOnError` | boolean | `false` | Halt on first failure |
+| `delayBetween` | number | `50` | ms delay between actions for realism |
+
+Each action: `{ action, selector, text, value, key, ms, options }`
+
+Supported actions: `click`, `fill`, `type`, `press`, `hover`, `select`, `scroll`, `focus`, `wait`, `waitForSelector`, `humanClick`, `humanType`, `snapshot`
+
+Returns: `{ results: [{index, success, result?, error?}], total, successful, failed }`
+
+```javascript
+// Fill a booking form in one call
+const result = await batchActions([
+  { action: 'fill',   selector: '#name',   text: 'John' },
+  { action: 'fill',   selector: '#phone',  text: '+1234567890' },
+  { action: 'select', selector: '#guests', value: '2' },
+  { action: 'humanClick', selector: '#submit' },
+], { stopOnError: true });
+// result.successful === 4, result.failed === 0
+```
+
 ### `humanType(page, selector, text)`
 
 Type text with human-like speed (60-220ms/char) and occasional micro-pauses.
@@ -299,9 +485,111 @@ Click a button by text label, searching through Shadow DOM.
 
 Paste text into Lexical, Draft.js, Quill, ProseMirror, or contenteditable editors.
 
-### `dumpInteractiveElements(page)`
+### `dumpInteractiveElements(page, opts)` / `dumpInteractiveElements(opts)` (from launchBrowser return)
 
-List all interactive elements including inside shadow roots. Use for debugging when selectors don't find elements.
+List all interactive elements using the accessibility tree. Equivalent to `snapshot({ interactiveOnly: true })`.
+Returns a compact YAML string with only buttons, inputs, links, and other interactive elements.
+Falls back to DOM querySelectorAll on Playwright < 1.49.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `selector` | string | `'body'` | CSS selector to scope the dump |
+
+### `getSessionLogs()`
+
+List all session log files, newest first. Returns `[{ sessionId, file, mtime, size }]`.
+
+### `getSessionLog(sessionId)`
+
+Read a specific session log by ID. Returns an array of log entries.
+
+## Action logging
+
+Every browser session records **comprehensive** structured logs in `~/.pets-browser/logs/<session-id>.jsonl`.
+The log captures the full picture: user's task → every agent action → page events → errors.
+
+### What's logged
+
+The logging system uses a **Proxy** on the Playwright `page` object to capture **every** method call —
+including chained locators like `page.getByRole('button', { name: 'Submit' }).click()`.
+
+**Automatically captured:**
+- **User task** — the `task` parameter from `launchBrowser({ task: "..." })`
+- **All page actions** — goto, click, fill, type, press, check, hover, selectOption, etc.
+- **All locator chains** — getByRole → click, getByLabel → fill, locator → nth → click, etc.
+- **Observation calls** — snapshot(), takeScreenshot(), dumpInteractiveElements()
+- **Page events** — navigations, popups, dialogs, downloads, page errors
+- **human\* helpers** — humanClick, humanType, humanScroll, etc.
+- **CAPTCHA** — solveCaptcha attempts and results
+
+### Log levels
+
+| Level | What's logged | Use case |
+|-------|--------------|----------|
+| `off` | Nothing | Production, no overhead |
+| `actions` (default) | User task, navigation, clicks, fills, typing, locator chains, observation calls, page events, human\* helpers, errors | Standard debugging — see what the agent does |
+| `verbose` | All above + textContent results, evaluate expressions, HTTP 4xx/5xx, console errors/warnings, logger.note() | Deep debugging — see what the agent reads and what goes wrong on the page |
+
+Set via `launchBrowser({ logLevel: 'verbose', task: 'Book a table at Aurora' })` or env `PB_LOG_LEVEL=verbose`.
+
+### Example log output (actions level)
+
+```jsonl
+{"ts":"...","action":"launch","country":"ru","mobile":true,"profile":"default","logLevel":"actions"}
+{"ts":"...","action":"task","prompt":"Войти в Telegram и отправить сообщение Привет"}
+{"ts":"...","action":"goto","method":"goto","args":["https://web.telegram.org"],"chain":"goto(\"https://web.telegram.org\")","url":"about:blank","ok":true,"status":200}
+{"ts":"...","action":"navigated","url":"https://web.telegram.org/a/"}
+{"ts":"...","action":"snapshot","selector":"body","interactiveOnly":false,"length":3842,"url":"https://web.telegram.org/a/"}
+{"ts":"...","action":"locator","chain":"getByRole(\"link\", {\"name\":\"Log in by phone Number\"})","url":"https://web.telegram.org/a/"}
+{"ts":"...","action":"click","method":"click","args":[],"chain":"getByRole(\"link\", {\"name\":\"Log in by phone Number\"}) → click()","url":"https://web.telegram.org/a/","ok":true}
+{"ts":"...","action":"navigated","url":"https://web.telegram.org/a/#/login"}
+{"ts":"...","action":"fill","method":"fill","args":["77054595958"],"chain":"getByLabel(\"Phone number\") → fill(\"77054595958\")","url":"https://web.telegram.org/a/#/login","ok":true}
+{"ts":"...","action":"screenshot","url":"https://web.telegram.org/a/#/login"}
+{"ts":"...","action":"humanClick","args":["page",100,200],"url":"https://web.telegram.org/a/#/login","ok":true}
+```
+
+### Recording user task
+
+Always pass the user's request via `task` so the log has full context:
+
+```javascript
+const { page, logger } = await launchBrowser({
+  task: 'Забронировать столик в Aurora на 8 марта, 19:00, 2 гостя',
+  logLevel: 'verbose',
+  country: 'ru',
+});
+```
+
+### Agent reasoning with `logger.note()`
+
+At `verbose` level, the agent can record its reasoning:
+
+```javascript
+logger.note('Navigating to booking page to check available slots');
+await page.goto('https://restaurant.com/booking');
+logger.note('Form is empty — need to fill date, time, guests before checking');
+```
+
+### Reading logs
+
+```javascript
+const { getSessionLogs, getSessionLog } = require('pets-browser/scripts/browser');
+
+// List recent sessions
+const sessions = getSessionLogs();
+// [{ sessionId: 'abc-123', mtime: '2026-03-01T...', size: 4096 }, ...]
+
+// Read a specific session
+const log = getSessionLog(sessions[0].sessionId);
+// [{ ts: '...', action: 'task', prompt: 'Войти в Telegram...' },
+//  { ts: '...', action: 'goto', method: 'goto', args: ['https://web.telegram.org'], ... },
+//  { ts: '...', action: 'click', chain: 'getByRole("link") → click()', ... }, ...]
+
+// Or from the current session
+const { getSessionLog: currentLog } = await launchBrowser();
+// ... do work ...
+const entries = currentLog();
+```
 
 ### `getCredentials()`
 
@@ -326,19 +614,25 @@ Build proxy config from environment variables. Supports Decodo, Bright Data, IPR
 
 ```javascript
 const { launchBrowser } = require('pets-browser/scripts/browser');
-const { page, humanType } = await launchBrowser({ country: 'us', mobile: false });
+const { page, snapshot } = await launchBrowser({ country: 'us', mobile: false });
 
 await page.goto('https://github.com/login');
-await humanType(page, '#login_field', 'myuser');
-await humanType(page, '#password', 'mypass');
-await page.click('input[name="commit"]');
+
+// Observe the page first — see what's available
+const tree = await snapshot({ interactiveOnly: true });
+// tree shows: textbox "Username or email address", textbox "Password", button "Sign in"
+
+// Use semantic locators that match the snapshot
+await page.getByLabel('Username or email address').fill('myuser');
+await page.getByLabel('Password').fill('mypass');
+await page.getByRole('button', { name: 'Sign in' }).click();
 ```
 
 ### Scrape with CAPTCHA bypass
 
 ```javascript
 const { launchBrowser, solveCaptcha } = require('pets-browser/scripts/browser');
-const { page } = await launchBrowser({ country: 'de' });
+const { page, snapshot } = await launchBrowser({ country: 'de' });
 
 await page.goto('https://protected-site.com');
 
@@ -349,7 +643,8 @@ try {
   console.log('No CAPTCHA found or solving failed:', e.message);
 }
 
-const data = await page.textContent('.content');
+// Read the content area compactly
+const content = await snapshot({ selector: '.content' });
 ```
 
 ### Fill Shadow DOM forms
