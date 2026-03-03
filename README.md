@@ -1,4 +1,4 @@
-# Pets Browser
+# Clawnet
 
 Stealth Chromium for AI agents. One install — anti-detection, residential proxies, CAPTCHA solving, human behavior.
 
@@ -55,10 +55,10 @@ AI agents that use Playwright or Puppeteer get blocked. Every major website runs
 
 A default Playwright browser fails **all of these simultaneously**. Setting `navigator.webdriver = false` alone doesn't help — sites check 50+ signals and flag inconsistencies between them.
 
-## How Pets Browser solves this
+## How Clawnet solves this
 
 ```
-clawhub install pets-browser
+clawhub install clawnet
 ```
 
 One install. Everything handled automatically.
@@ -87,7 +87,7 @@ Two device profiles that are internally consistent across all signals:
 
 ### Residential proxies
 
-Datacenter IPs get flagged. Pets Browser routes through real residential IPs:
+Datacenter IPs get flagged. Clawnet routes through real residential IPs:
 
 ```
 ┌─────────────┬──────────────────────────────────────────┐
@@ -146,7 +146,7 @@ Many modern sites use Shadow DOM (web components). Standard `querySelector` can'
 // Standard — fails
 await page.$('#shadow-host >>> #inner-input');
 
-// Pets Browser — works
+// Clawnet — works
 await shadowFill(page, '#inner-input', 'value');
 await shadowClickButton(page, 'Submit');
 ```
@@ -158,16 +158,16 @@ Recursively traverses all shadow roots to find elements.
 ### Install
 
 ```bash
-clawhub install pets-browser
+clawhub install clawnet
 # or
-npm install pets-browser
+npm install clawnet
 ```
 
 On install:
 1. Downloads Chromium via Playwright
 2. Generates agent credentials (`agentId` + `agentSecret` + `recoveryCode`)
-3. Saves to `~/.pets-browser/agent-credentials.json`
-4. Registers with Pets Browser API (starts a 2-hour free trial on first launch)
+3. Saves to `~/.clawnet/agent-credentials.json`
+4. Registers with Clawnet API (starts a 2-hour free trial on first launch)
 
 Credential model:
 - `agentId` is stable and identifies the subscription owner.
@@ -178,7 +178,7 @@ Credential model:
 ### Basic usage
 
 ```js
-const { launchBrowser } = require('pets-browser/scripts/browser');
+const { launchBrowser } = require('clawnet/scripts/browser');
 
 const { browser, page, humanClick, humanType, solveCaptcha } =
   await launchBrowser({ country: 'us' });
@@ -213,7 +213,7 @@ Set `profile: null` if you need a fully ephemeral browser.
 |------|-------------|------|
 | **Managed** | Agent authenticates with stable `agentId:agentSecret`; Decodo and 2captcha secrets stay on server | 2-hour free trial, then subscription |
 | **BYO** | You provide your own proxy + captcha keys via env vars | Free forever |
-| **No proxy** | `PB_NO_PROXY=1` — direct connection, local testing | Free |
+| **No proxy** | `CN_NO_PROXY=1` — direct connection, local testing | Free |
 
 ## Configuration
 
@@ -221,22 +221,22 @@ Copy `.env.example` → `.env`:
 
 ```bash
 # Managed mode (subscription)
-PB_API_URL=https://api.clawpets.io/pets-browser/v1
-# PB_AGENT_TOKEN=PB1.<agentId>.<agentSecret>
-# PB_AGENT_ID=
-# PB_AGENT_SECRET=
-# PB_AGENT_RECOVERY_CODE=
+CN_API_URL=https://api.clawpets.io/clawnet/v1
+# CN_AGENT_TOKEN=CN1.<agentId>.<agentSecret>
+# CN_AGENT_ID=
+# CN_AGENT_SECRET=
+# CN_AGENT_RECOVERY_CODE=
 
 # BYO mode (bring your own)
-PB_PROXY_PROVIDER=decodo          # decodo | brightdata | iproyal | nodemaven
-PB_PROXY_USER=
-PB_PROXY_PASS=
-PB_PROXY_COUNTRY=us
-# PB_PROXY_SERVER=                # Full override: http://host:port
-# PB_PROXY_SESSION=               # Sticky session (Decodo: port 10001-49999)
-# PB_NO_PROXY=1                   # Disable proxy entirely
-# PB_PROFILE=default              # Persistent profile name (null via code => ephemeral)
-# PB_CHROMIUM_NO_SANDBOX=         # 1 force disable / 0 force enable (auto: Docker only)
+CN_PROXY_PROVIDER=decodo          # decodo | brightdata | iproyal | nodemaven
+CN_PROXY_USER=
+CN_PROXY_PASS=
+CN_PROXY_COUNTRY=us
+# CN_PROXY_SERVER=                # Full override: http://host:port
+# CN_PROXY_SESSION=               # Sticky session (Decodo: port 10001-49999)
+# CN_NO_PROXY=1                   # Disable proxy entirely
+# CN_PROFILE=default              # Persistent profile name (null via code => ephemeral)
+# CN_CHROMIUM_NO_SANDBOX=         # 1 force disable / 0 force enable (auto: Docker only)
 
 # CAPTCHA solving (BYO fallback only)
 # TWOCAPTCHA_KEY=
@@ -282,7 +282,7 @@ See [SKILL.md](./SKILL.md) for the full agent-facing documentation.
 
 ## Environment files
 
-- `.env.example` (repo root): public client/agent variables (`PB_*`, optional BYO proxy/captcha vars).
+- `.env.example` (repo root): public client/agent variables (`CN_*`, optional BYO proxy/captcha vars).
 - `server/.env.example`: private backend/server variables (billing, DB, managed proxy/captcha providers).
 - `.env` and `server/.env`: local runtime secrets. They are gitignored and should not be committed.
 

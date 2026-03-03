@@ -1,5 +1,5 @@
 /**
- * browser.js — Pets Browser for AI Agents v1.0.0
+ * browser.js — Clawnet for AI Agents v1.0.0
  *
  * Stealth browser with residential proxies from 10+ countries.
  * Appears as iPhone 15 Pro or Desktop Chrome to every website.
@@ -12,22 +12,22 @@
  *   const { browser, page } = await launchBrowser({ country: 'us' });
  *
  * Zero-config: launchBrowser() auto-registers a new agent on first call.
- * No env vars required. Credentials are saved to ~/.pets-browser/agent-credentials.json.
+ * No env vars required. Credentials are saved to ~/.clawnet/agent-credentials.json.
  *
  * Proxy config via env vars (optional — BYO mode):
- *   PB_PROXY_PROVIDER  — decodo | brightdata | iproyal | nodemaven (default: decodo)
- *   PB_PROXY_USER      — proxy username
- *   PB_PROXY_PASS      — proxy password
- *   PB_PROXY_SERVER    — full override: http://host:port
- *   PB_PROXY_COUNTRY   — country code: ro, us, de, gb, fr, nl, sg... (default: us)
- *   PB_PROXY_SESSION   — Decodo sticky port 10001-49999 (unique IP per user)
- *   PB_NO_PROXY        — set to "1" to disable proxy entirely
+ *   CN_PROXY_PROVIDER  — decodo | brightdata | iproyal | nodemaven (default: decodo)
+ *   CN_PROXY_USER      — proxy username
+ *   CN_PROXY_PASS      — proxy password
+ *   CN_PROXY_SERVER    — full override: http://host:port
+ *   CN_PROXY_COUNTRY   — country code: ro, us, de, gb, fr, nl, sg... (default: us)
+ *   CN_PROXY_SESSION   — Decodo sticky port 10001-49999 (unique IP per user)
+ *   CN_NO_PROXY        — set to "1" to disable proxy entirely
  *
  * Service credentials (optional — auto-generated if not set):
- *   PB_API_URL         — Pets Browser API base URL (default: https://api.clawpets.io/pets-browser/v1)
- *   PB_AGENT_TOKEN     — Full auth token: PB1.<agentId>.<agentSecret>
- *   PB_AGENT_ID        — Agent UUID (alternative to token)
- *   PB_AGENT_SECRET    — Agent secret (alternative to token)
+ *   CN_API_URL         — Clawnet API base URL (default: https://api.clawpets.io/clawnet/v1)
+ *   CN_AGENT_TOKEN     — Full auth token: CN1.<agentId>.<agentSecret>
+ *   CN_AGENT_ID        — Agent UUID (alternative to token)
+ *   CN_AGENT_SECRET    — Agent secret (alternative to token)
  *
  * CAPTCHA:
  *   TWOCAPTCHA_KEY     — 2captcha.com API key (BYO)
@@ -47,7 +47,7 @@ function _requirePlaywright() {
     try { return fn(); } catch (_) {}
   }
   throw new Error(
-    '[pets-browser] playwright not found.\n' +
+    '[clawnet] playwright not found.\n' +
     'Run: npm install playwright && npx playwright install chromium'
   );
 }
@@ -147,25 +147,25 @@ const PROXY_PRESETS = {
 };
 
 function makeProxy(sessionId = null, country = null) {
-  if (process.env.PB_NO_PROXY === '1') return null;
+  if (process.env.CN_NO_PROXY === '1') return null;
 
-  const cty = (country || process.env.PB_PROXY_COUNTRY || 'us').toLowerCase();
+  const cty = (country || process.env.CN_PROXY_COUNTRY || 'us').toLowerCase();
 
   // 1. Full manual BYO override — explicit env vars take priority
-  if (process.env.PB_PROXY_SERVER && process.env.PB_PROXY_USER) {
+  if (process.env.CN_PROXY_SERVER && process.env.CN_PROXY_USER) {
     return {
-      server:   process.env.PB_PROXY_SERVER,
-      username: process.env.PB_PROXY_USER,
-      password: process.env.PB_PROXY_PASS || '',
+      server:   process.env.CN_PROXY_SERVER,
+      username: process.env.CN_PROXY_USER,
+      password: process.env.CN_PROXY_PASS || '',
     };
   }
 
-  // 2. BYO provider (decodo / brightdata / iproyal / nodemaven via PB_PROXY_PROVIDER)
+  // 2. BYO provider (decodo / brightdata / iproyal / nodemaven via CN_PROXY_PROVIDER)
   //    Only activates when BOTH provider AND credentials are set.
-  //    Without PB_PROXY_USER/PB_PROXY_PASS, falls through to managed mode.
-  const providerName = process.env.PB_PROXY_PROVIDER;
-  const providerUser = process.env.PB_PROXY_USER?.trim();
-  const providerPass = process.env.PB_PROXY_PASS?.trim();
+  //    Without CN_PROXY_USER/CN_PROXY_PASS, falls through to managed mode.
+  const providerName = process.env.CN_PROXY_PROVIDER;
+  const providerUser = process.env.CN_PROXY_USER?.trim();
+  const providerPass = process.env.CN_PROXY_PASS?.trim();
   if (providerName && PROXY_PRESETS[providerName] && providerUser && providerPass) {
     const preset = PROXY_PRESETS[providerName];
     const user = providerUser;
@@ -176,14 +176,14 @@ function makeProxy(sessionId = null, country = null) {
       const portMax = preset.stickyPortMax || 49999;
       const randomPort = () => Math.floor(Math.random() * (portMax - portMin + 1)) + portMin;
       const parsePort = (v) => { const n = parseInt(v, 10); return (Number.isFinite(n) && n >= portMin && n <= portMax) ? n : null; };
-      const port = parsePort(sessionId) ?? parsePort(process.env.PB_PROXY_SESSION) ?? randomPort();
+      const port = parsePort(sessionId) ?? parsePort(process.env.CN_PROXY_SESSION) ?? randomPort();
       const server = preset.serverTemplate(cty, port);
       const username = preset.usernameTemplate(user, cty, port);
       const password = preset.passwordTemplate ? preset.passwordTemplate(pass, cty, port) : pass;
       return { server, username, password };
     }
     // Other providers: session-string based
-    const sid = sessionId || process.env.PB_PROXY_SESSION || Math.random().toString(36).slice(2, 10);
+    const sid = sessionId || process.env.CN_PROXY_SESSION || Math.random().toString(36).slice(2, 10);
     const server = preset.server;
     const username = preset.usernameTemplate(user, cty, sid);
     const password = preset.passwordTemplate ? preset.passwordTemplate(pass, cty, sid) : pass;
@@ -196,7 +196,7 @@ function makeProxy(sessionId = null, country = null) {
   //    Access is gated on _proxyAllowed, which is set by getCredentials() from the server's
   //    sessionGranted flag. If trial is exceeded, we return null so the browser runs without
   //    the managed proxy (will get CAPTCHAs) rather than receiving 407 from the forward proxy.
-  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
+  const apiUrl = process.env.CN_API_URL || DEFAULT_API_URL;
 
   if (!_proxyAllowed) {
     // Trial expired or getCredentials() hasn't been called yet / returned sessionGranted=false
@@ -205,20 +205,20 @@ function makeProxy(sessionId = null, country = null) {
 
   const creds = resolveAgentCredentials();
   if (!creds) {
-    console.warn('[pets-browser] No agent credentials found. Set PB_AGENT_TOKEN or run: npm install pets-browser');
+    console.warn('[clawnet] No agent credentials found. Set CN_AGENT_TOKEN or run: npm install clawnet');
     return null;
   }
 
   try {
     const proxyHost = new URL(apiUrl).hostname;
-    const proxyPort = process.env.PB_PROXY_PORT || '8080';
+    const proxyPort = process.env.CN_PROXY_PORT || '8080';
     return {
       server:   `http://${proxyHost}:${proxyPort}`,
       username: `${creds.agentId}|${cty}`,  // forward proxy splits on '|' to get country
       password: creds.agentSecret,
     };
   } catch (_) {
-    console.warn('[pets-browser] Could not parse PB_API_URL for managed proxy host.');
+    console.warn('[clawnet] Could not parse CN_API_URL for managed proxy host.');
     return null;
   }
 }
@@ -230,12 +230,12 @@ const _fs     = require('fs');
 const _os     = require('os');
 const _crypto = require('crypto');
 
-const DEFAULT_API_URL = 'https://api.clawpets.io/pets-browser/v1';
+const DEFAULT_API_URL = 'https://api.clawpets.io/clawnet/v1';
 
-const CREDENTIALS_FILE = _path.join(_os.homedir(), '.pets-browser', 'agent-credentials.json');
-const PROFILES_DIR = _path.join(_os.homedir(), '.pets-browser', 'profiles');
-const LOGS_DIR    = _path.join(_os.homedir(), '.pets-browser', 'logs');
-const DEFAULT_PROFILE_NAME = (process.env.PB_PROFILE || 'default').trim() || 'default';
+const CREDENTIALS_FILE = _path.join(_os.homedir(), '.clawnet', 'agent-credentials.json');
+const PROFILES_DIR = _path.join(_os.homedir(), '.clawnet', 'profiles');
+const LOGS_DIR    = _path.join(_os.homedir(), '.clawnet', 'logs');
+const DEFAULT_PROFILE_NAME = (process.env.CN_PROFILE || 'default').trim() || 'default';
 const LOG_LEVELS  = ['off', 'actions', 'verbose'];
 const MAX_LOG_SESSIONS = 50;
 
@@ -347,7 +347,7 @@ function isDockerRuntime() {
     return _cachedDockerRuntime;
   }
 
-  const forced = process.env.PB_RUNTIME_DOCKER?.trim().toLowerCase();
+  const forced = process.env.CN_RUNTIME_DOCKER?.trim().toLowerCase();
   if (forced === '1' || forced === 'true' || forced === 'yes') {
     _cachedDockerRuntime = true;
     return true;
@@ -391,7 +391,7 @@ function isDockerRuntime() {
 }
 
 function shouldDisableSandbox() {
-  const forced = process.env.PB_CHROMIUM_NO_SANDBOX?.trim().toLowerCase();
+  const forced = process.env.CN_CHROMIUM_NO_SANDBOX?.trim().toLowerCase();
   if (forced === '1' || forced === 'true' || forced === 'yes') return true;
   if (forced === '0' || forced === 'false' || forced === 'no') return false;
   return isDockerRuntime();
@@ -401,9 +401,9 @@ function logSandboxMode(disableSandbox) {
   if (_sandboxModeLogged) return;
   _sandboxModeLogged = true;
   if (disableSandbox) {
-    console.log('[pets-browser] Chromium sandbox disabled (container runtime detected).');
+    console.log('[clawnet] Chromium sandbox disabled (container runtime detected).');
   } else {
-    console.log('[pets-browser] Chromium sandbox enabled (host runtime detected).');
+    console.log('[clawnet] Chromium sandbox enabled (host runtime detected).');
   }
 }
 
@@ -430,12 +430,12 @@ function loadAgentCredentials() {
 }
 
 function buildAgentToken(agentId, agentSecret) {
-  return `PB1.${agentId}.${agentSecret}`;
+  return `CN1.${agentId}.${agentSecret}`;
 }
 
 /**
  * Resolve agent credentials from any supported source.
- * Priority: rotated file > PB_AGENT_TOKEN > PB_AGENT_ID+PB_AGENT_SECRET > non-rotated file.
+ * Priority: rotated file > CN_AGENT_TOKEN > CN_AGENT_ID+CN_AGENT_SECRET > non-rotated file.
  *
  * Rotated credentials (saved after server-side secret rotation) take top priority
  * because env vars may contain a stale original secret. After rotation, the file
@@ -450,23 +450,23 @@ function resolveAgentCredentials() {
     return { agentId: fileCreds.agentId, agentSecret: fileCreds.agentSecret };
   }
 
-  // 1. PB_AGENT_TOKEN=PB1.<agentId>.<agentSecret>
-  const directToken = process.env.PB_AGENT_TOKEN?.trim();
-  if (directToken && directToken.startsWith('PB1.')) {
+  // 1. CN_AGENT_TOKEN=CN1.<agentId>.<agentSecret>
+  const directToken = process.env.CN_AGENT_TOKEN?.trim();
+  if (directToken && directToken.startsWith('CN1.')) {
     const parts = directToken.split('.');
     if (parts.length === 3 && AGENT_ID_RE.test(parts[1]) && AGENT_SECRET_RE.test(parts[2])) {
       return { agentId: parts[1], agentSecret: parts[2] };
     }
   }
 
-  // 2. PB_AGENT_ID + PB_AGENT_SECRET
-  const envAgentId = process.env.PB_AGENT_ID?.trim();
-  const envAgentSecret = process.env.PB_AGENT_SECRET?.trim();
+  // 2. CN_AGENT_ID + CN_AGENT_SECRET
+  const envAgentId = process.env.CN_AGENT_ID?.trim();
+  const envAgentSecret = process.env.CN_AGENT_SECRET?.trim();
   if (AGENT_ID_RE.test(envAgentId || '') && AGENT_SECRET_RE.test(envAgentSecret || '')) {
     return { agentId: envAgentId, agentSecret: envAgentSecret };
   }
 
-  // 3. Non-rotated file (~/.pets-browser/agent-credentials.json)
+  // 3. Non-rotated file (~/.clawnet/agent-credentials.json)
   return fileCreds;
 }
 
@@ -476,7 +476,7 @@ function resolveAgentToken() {
 }
 
 /**
- * Auto-register a new agent with the Pets Browser API.
+ * Auto-register a new agent with the Clawnet API.
  * Generates credentials, registers with the server, and saves to disk.
  * Called automatically by launchBrowser() when no credentials are found.
  *
@@ -490,7 +490,7 @@ async function autoRegisterAgent(apiUrl) {
   // re-run postinstall interactively.
   const credentialsDir = _path.dirname(CREDENTIALS_FILE);
   if (_fs.existsSync(CREDENTIALS_FILE) || _fs.existsSync(credentialsDir)) {
-    console.error('[pets-browser] Agent account already exists.');
+    console.error('[clawnet] Agent account already exists.');
     console.error('  Cannot generate new credentials — use importCredentials() to');
     console.error('  provide your existing agentId and agentSecret instead.');
     return null;
@@ -500,7 +500,7 @@ async function autoRegisterAgent(apiUrl) {
   const agentSecret = _crypto.randomBytes(32).toString('base64url');
   const recoveryCode = _crypto.randomBytes(24).toString('base64url');
 
-  console.log('[pets-browser] First run — registering new agent...');
+  console.log('[clawnet] First run — registering new agent...');
 
   try {
     const resp = await fetch(`${apiUrl.replace(/\/$/, '')}/agents/register`, {
@@ -512,14 +512,14 @@ async function autoRegisterAgent(apiUrl) {
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      console.warn(`[pets-browser] Auto-registration failed (HTTP ${resp.status}): ${text}`);
+      console.warn(`[clawnet] Auto-registration failed (HTTP ${resp.status}): ${text}`);
       return null;
     }
 
     const data = await resp.json();
-    console.log(`[pets-browser] Agent registered. Trial: ${data.trialLimit ?? 1} free session(s).`);
+    console.log(`[clawnet] Agent registered. Trial: ${data.trialLimit ?? 1} free session(s).`);
   } catch (err) {
-    console.warn(`[pets-browser] Auto-registration failed: ${err.message}`);
+    console.warn(`[clawnet] Auto-registration failed: ${err.message}`);
     return null;
   }
 
@@ -534,14 +534,14 @@ async function autoRegisterAgent(apiUrl) {
   try {
     _fs.mkdirSync(_path.dirname(CREDENTIALS_FILE), { recursive: true, mode: 0o700 });
     _fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 });
-    console.log(`[pets-browser] Credentials saved to ${CREDENTIALS_FILE}`);
+    console.log(`[clawnet] Credentials saved to ${CREDENTIALS_FILE}`);
   } catch (err) {
-    console.warn(`[pets-browser] Could not save credentials to disk: ${err.message}`);
+    console.warn(`[clawnet] Could not save credentials to disk: ${err.message}`);
   }
 
   // Set env vars for current process so resolveAgentCredentials() picks them up
-  process.env.PB_AGENT_ID = agentId;
-  process.env.PB_AGENT_SECRET = agentSecret;
+  process.env.CN_AGENT_ID = agentId;
+  process.env.CN_AGENT_SECRET = agentSecret;
 
   return creds;
 }
@@ -581,22 +581,22 @@ function importCredentials(agentId, agentSecret) {
   }
 
   // Update env vars for current process
-  process.env.PB_AGENT_ID = agentId;
-  process.env.PB_AGENT_SECRET = agentSecret;
+  process.env.CN_AGENT_ID = agentId;
+  process.env.CN_AGENT_SECRET = agentSecret;
 
-  console.log(`[pets-browser] Credentials imported and saved for agentId: ${agentId}`);
+  console.log(`[clawnet] Credentials imported and saved for agentId: ${agentId}`);
   return { ok: true, agentId };
 }
 
 // ─── SERVICE CREDENTIALS ──────────────────────────────────────────────────────
 
 /**
- * Fetch managed credentials from Pets Browser API (proxy + captcha keys).
+ * Fetch managed credentials from Clawnet API (proxy + captcha keys).
  *
- * Authentication: uses PB1.<agentId>.<agentSecret> token from:
- * 1) PB_AGENT_TOKEN
- * 2) PB_AGENT_ID + PB_AGENT_SECRET
- * 3) ~/.pets-browser/agent-credentials.json
+ * Authentication: uses CN1.<agentId>.<agentSecret> token from:
+ * 1) CN_AGENT_TOKEN
+ * 2) CN_AGENT_ID + CN_AGENT_SECRET
+ * 3) ~/.clawnet/agent-credentials.json
  *
  * If agent has a subscription or trial remaining, returns managed
  * Decodo proxy + 2captcha credentials.
@@ -605,13 +605,13 @@ function importCredentials(agentId, agentSecret) {
  * @returns {{ ok: boolean, proxy?, captcha?, trialRemaining? }}
  */
 async function getCredentials() {
-  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
+  const apiUrl = process.env.CN_API_URL || DEFAULT_API_URL;
 
   // Resolve agent auth token
   const agentToken = resolveAgentToken();
 
   if (!apiUrl || !agentToken) {
-    console.warn('[pets-browser] No API config. Using BYO credentials from env vars.');
+    console.warn('[clawnet] No API config. Using BYO credentials from env vars.');
     return { ok: false, reason: 'no_api_config' };
   }
 
@@ -627,7 +627,7 @@ async function getCredentials() {
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      console.warn(`[pets-browser] Credentials API returned ${resp.status}: ${text}`);
+      console.warn(`[clawnet] Credentials API returned ${resp.status}: ${text}`);
       return { ok: false, reason: 'api_error', status: resp.status };
     }
 
@@ -655,11 +655,11 @@ async function getCredentials() {
       }
 
       // Update process env so makeProxy() picks up the new secret
-      process.env.PB_AGENT_TOKEN = data.newAgentToken;
+      process.env.CN_AGENT_TOKEN = data.newAgentToken;
       if (rotatedCreds.agentId) {
-        process.env.PB_AGENT_ID = rotatedCreds.agentId;
+        process.env.CN_AGENT_ID = rotatedCreds.agentId;
       }
-      process.env.PB_AGENT_SECRET = data.newAgentSecret;
+      process.env.CN_AGENT_SECRET = data.newAgentSecret;
     }
 
     // Update managed proxy access permission.
@@ -674,16 +674,16 @@ async function getCredentials() {
     // Managed proxy now uses stable agentId:agentSecret via makeProxy() directly,
     // so no env vars needed and no TTL to track.
     if (data.proxy && data.proxy.source === 'byo') {
-      if (data.proxy.server)   process.env.PB_PROXY_SERVER   = data.proxy.server;
-      if (data.proxy.username) process.env.PB_PROXY_USER     = data.proxy.username;
-      if (data.proxy.password) process.env.PB_PROXY_PASS     = data.proxy.password;
-      if (data.proxy.provider) process.env.PB_PROXY_PROVIDER = data.proxy.provider;
-      if (data.proxy.country)  process.env.PB_PROXY_COUNTRY  = data.proxy.country;
+      if (data.proxy.server)   process.env.CN_PROXY_SERVER   = data.proxy.server;
+      if (data.proxy.username) process.env.CN_PROXY_USER     = data.proxy.username;
+      if (data.proxy.password) process.env.CN_PROXY_PASS     = data.proxy.password;
+      if (data.proxy.provider) process.env.CN_PROXY_PROVIDER = data.proxy.provider;
+      if (data.proxy.country)  process.env.CN_PROXY_COUNTRY  = data.proxy.country;
     } else if (!data.proxy) {
       // Server revoked BYO keys — clear any cached BYO credentials
-      delete process.env.PB_PROXY_SERVER;
-      delete process.env.PB_PROXY_USER;
-      delete process.env.PB_PROXY_PASS;
+      delete process.env.CN_PROXY_SERVER;
+      delete process.env.CN_PROXY_USER;
+      delete process.env.CN_PROXY_PASS;
     }
 
     // Apply or revoke captcha key
@@ -697,22 +697,22 @@ async function getCredentials() {
     if (typeof data.trialRemainingMs === 'number' && !data.subscriptionActive) {
       if (data.trialRemainingMs <= 0) {
         if (data.upgradeUrl) {
-          console.log(`[pets-browser] Trial expired. Subscribe to continue: ${data.upgradeUrl}`);
+          console.log(`[clawnet] Trial expired. Subscribe to continue: ${data.upgradeUrl}`);
         } else {
-          console.log('[pets-browser] Trial expired. Subscribe at https://petsbrowser.dev or use BYO keys.');
+          console.log('[clawnet] Trial expired. Subscribe at https://petsbrowser.dev or use BYO keys.');
         }
       } else {
         const mins = Math.ceil(data.trialRemainingMs / 60_000);
         const display = mins >= 60
           ? `${Math.floor(mins / 60)}h ${mins % 60}m`
           : `${mins}m`;
-        console.log(`[pets-browser] Trial: ${display} remaining.`);
+        console.log(`[clawnet] Trial: ${display} remaining.`);
       }
     }
 
     return { ok: true, ...data };
   } catch (err) {
-    console.warn('[pets-browser] Failed to fetch credentials:', err.message);
+    console.warn('[clawnet] Failed to fetch credentials:', err.message);
     return { ok: false, reason: 'network_error', error: err.message };
   }
 }
@@ -930,7 +930,7 @@ async function solveCaptcha(page, opts = {}) {
   let token = null;
 
   // Try server-side solving first (managed mode — no API key needed)
-  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
+  const apiUrl = process.env.CN_API_URL || DEFAULT_API_URL;
   const agentToken = resolveAgentToken();
 
   if (apiUrl && agentToken) {
@@ -1393,7 +1393,7 @@ function buildResult(browser, ctx, page, logger) {
  *                                   Default: "default". Pass null for ephemeral.
  * @param {boolean} opts.reuse     — Reuse running browser for this profile. Proxy mode must match
  *                                   the existing live context. Default: true
- * @param {string}  opts.logLevel  — 'off' | 'actions' | 'verbose'. Default: 'actions' (env PB_LOG_LEVEL)
+ * @param {string}  opts.logLevel  — 'off' | 'actions' | 'verbose'. Default: 'actions' (env CN_LOG_LEVEL)
  * @param {string}  opts.task      — User's task / prompt to record in the session log. Optional.
  *
  * @returns {{ browser, ctx, page, logger, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, takeScreenshot, screenshotAndReport, snapshot, dumpInteractiveElements, sleep, rand, getSessionLog }}
@@ -1413,8 +1413,8 @@ async function launchBrowser(opts = {}) {
   const normalizedProfile = typeof profile === 'string' ? profile.trim() : profile;
   const profileName = normalizedProfile === '' ? DEFAULT_PROFILE_NAME : normalizedProfile;
 
-  const cty   = country || process.env.PB_PROXY_COUNTRY || 'us';
-  const level = logLevel || process.env.PB_LOG_LEVEL || 'actions';
+  const cty   = country || process.env.CN_PROXY_COUNTRY || 'us';
+  const level = logLevel || process.env.CN_LOG_LEVEL || 'actions';
   const logger = new ActionLogger(_crypto.randomUUID(), level);
   logger.log('launch', { country: cty, mobile, profile: profileName, useProxy, headless, logLevel: level });
   if (task) logger.log('task', { prompt: typeof task === 'string' ? task : JSON.stringify(task) });
@@ -1425,11 +1425,11 @@ async function launchBrowser(opts = {}) {
   if (reuse && profileName) {
     const active = _activeBrowsers.get(profileName);
     if (active) {
-      const requestedProxyEnabled = Boolean(useProxy) && process.env.PB_NO_PROXY !== '1';
+      const requestedProxyEnabled = Boolean(useProxy) && process.env.CN_NO_PROXY !== '1';
       const activeProxyEnabled = Boolean(active.proxyEnabled);
       if (requestedProxyEnabled !== activeProxyEnabled) {
         throw new Error(
-          `[pets-browser] Reuse refused for profile "${profileName}": ` +
+          `[clawnet] Reuse refused for profile "${profileName}": ` +
           `existing context proxy=${activeProxyEnabled ? 'on' : 'off'}, requested proxy=${requestedProxyEnabled ? 'on' : 'off'}. ` +
           'Close this profile (closeBrowser) or launch with reuse:false/new profile to change proxy mode.'
         );
@@ -1438,7 +1438,7 @@ async function launchBrowser(opts = {}) {
       try {
         active.ctx.pages(); // throws if context is dead
         const page = await active.ctx.newPage();
-        console.log(`[pets-browser] Reusing browser for profile "${profileName}"`);
+        console.log(`[clawnet] Reusing browser for profile "${profileName}"`);
         logger.log('reuse', { profile: profileName });
         return buildResult(active.browser, active.ctx, page, logger);
       } catch (_) {
@@ -1450,12 +1450,12 @@ async function launchBrowser(opts = {}) {
 
   // ── Fresh launch: ensure credentials exist and fetch managed config ──
   if (!resolveAgentCredentials()) {
-    await autoRegisterAgent(process.env.PB_API_URL || DEFAULT_API_URL);
+    await autoRegisterAgent(process.env.CN_API_URL || DEFAULT_API_URL);
   }
   try {
     await getCredentials();
   } catch (e) {
-    console.warn('[pets-browser] Could not fetch managed credentials:', e.message);
+    console.warn('[clawnet] Could not fetch managed credentials:', e.message);
   }
 
   const device = buildDevice(mobile, cty);
@@ -1465,11 +1465,11 @@ async function launchBrowser(opts = {}) {
   // Fail-closed: refuse to launch without proxy unless explicitly opted out.
   // A silent fallback to no-proxy would expose the agent's real datacenter IP,
   // defeating the entire purpose of a stealth browser.
-  // Users who intentionally want no proxy must set useProxy:false or PB_NO_PROXY=1.
-  if (useProxy && !proxy && process.env.PB_NO_PROXY !== '1') {
+  // Users who intentionally want no proxy must set useProxy:false or CN_NO_PROXY=1.
+  if (useProxy && !proxy && process.env.CN_NO_PROXY !== '1') {
     throw new Error(
-      '[pets-browser] Proxy unavailable — auto-registration failed or trial/subscription expired. ' +
-      'Set PB_NO_PROXY=1 to launch without proxy, or provide BYO credentials via PB_PROXY_SERVER/PB_PROXY_USER.'
+      '[clawnet] Proxy unavailable — auto-registration failed or trial/subscription expired. ' +
+      'Set CN_NO_PROXY=1 to launch without proxy, or provide BYO credentials via CN_PROXY_SERVER/CN_PROXY_USER.'
     );
   }
 
@@ -1485,7 +1485,7 @@ async function launchBrowser(opts = {}) {
     launchArgs.unshift('--disable-setuid-sandbox');
     launchArgs.unshift('--no-sandbox');
   }
-  if (process.env.PB_DISABLE_WEB_SECURITY === '1') {
+  if (process.env.CN_DISABLE_WEB_SECURITY === '1') {
     launchArgs.push('--disable-web-security');
   }
 
@@ -1517,7 +1517,7 @@ async function launchBrowser(opts = {}) {
       _activeBrowsers.set(profileName, { browser, ctx, proxyEnabled: Boolean(proxy) });
     }
 
-    console.log(`[pets-browser] Launched with persistent profile "${profileName}"`);
+    console.log(`[clawnet] Launched with persistent profile "${profileName}"`);
     return result;
   }
 
@@ -1942,7 +1942,7 @@ module.exports = {
 // ─── QUICK TEST ───────────────────────────────────────────────────────────────
 if (require.main === module) {
   const country = process.argv[2] || 'us';
-  console.log(`Testing Pets Browser v1.0.0 — country: ${country.toUpperCase()}\n`);
+  console.log(`Testing Clawnet v1.0.0 — country: ${country.toUpperCase()}\n`);
   (async () => {
     const { browser, page } = await launchBrowser({ country, mobile: true });
     await page.goto('https://ipinfo.io/json', { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -1958,6 +1958,6 @@ if (require.main === module) {
     } else {
       await page.context().close();
     }
-    console.log('\nPets Browser v1.0.0 is ready.');
+    console.log('\nClawnet v1.0.0 is ready.');
   })().catch(console.error);
 }

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * postinstall.js — Pets Browser setup
+ * postinstall.js — Clawnet setup
  *
- * Runs automatically on `npm install` / `clawhub install pets-browser`:
+ * Runs automatically on `npm install` / `clawhub install clawnet`:
  * 1. Installs Chromium via Playwright
  * 2. Creates or imports agent credentials (agentId + agentSecret)
- * 3. Saves credentials to ~/.pets-browser/agent-credentials.json
- * 4. Registers the agent with Pets Browser API (if PB_API_URL is set)
+ * 3. Saves credentials to ~/.clawnet/agent-credentials.json
+ * 4. Registers the agent with Clawnet API (if CN_API_URL is set)
  *
  * Identity model:
  * - agentId is stable for one subscription identity
@@ -22,23 +22,23 @@ const path = require('path');
 const os = require('os');
 const readline = require('readline');
 
-const CREDENTIALS_DIR = path.join(os.homedir(), '.pets-browser');
+const CREDENTIALS_DIR = path.join(os.homedir(), '.clawnet');
 const CREDENTIALS_FILE = path.join(CREDENTIALS_DIR, 'agent-credentials.json');
-const DEFAULT_API_URL = 'https://api.clawpets.io/pets-browser/v1';
+const DEFAULT_API_URL = 'https://api.clawpets.io/clawnet/v1';
 
 const AGENT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const AGENT_SECRET_RE = /^[A-Za-z0-9_-]{32,200}$/;
 const RECOVERY_CODE_RE = /^[A-Za-z0-9_-]{20,200}$/;
 
 function installChromiumDeps() {
-  console.log('[pets-browser] Installing Chromium system dependencies...');
+  console.log('[clawnet] Installing Chromium system dependencies...');
   try {
     // Try playwright's built-in deps installer first (needs root/sudo)
     execSync('npx playwright install-deps chromium', {
       stdio: 'inherit',
       timeout: 120_000,
     });
-    console.log('[pets-browser] System dependencies installed.');
+    console.log('[clawnet] System dependencies installed.');
     return;
   } catch (_) {}
 
@@ -57,23 +57,23 @@ function installChromiumDeps() {
       stdio: 'inherit',
       timeout: 120_000,
     });
-    console.log('[pets-browser] System dependencies installed via apt-get.');
+    console.log('[clawnet] System dependencies installed via apt-get.');
   } catch (_) {
-    console.warn('[pets-browser] WARNING: Could not install system dependencies.');
+    console.warn('[clawnet] WARNING: Could not install system dependencies.');
     console.warn('  Run manually: apt-get install -y ' + libs);
   }
 }
 
 function installChromium() {
-  console.log('[pets-browser] Installing Chromium...');
+  console.log('[clawnet] Installing Chromium...');
   try {
     execSync('npx playwright install chromium', {
       stdio: 'inherit',
       timeout: 300_000,
     });
-    console.log('[pets-browser] Chromium binary installed.');
+    console.log('[clawnet] Chromium binary installed.');
   } catch (_) {
-    console.error('[pets-browser] WARNING: Chromium install failed. You may need to run manually:');
+    console.error('[clawnet] WARNING: Chromium install failed. You may need to run manually:');
     console.error('  npx playwright install chromium');
   }
 
@@ -157,15 +157,15 @@ function saveCredentials(credentials) {
 }
 
 function readCredentialsFromEnv() {
-  const combined = parseCombinedCredentials(process.env.PB_AGENT_CREDENTIALS);
+  const combined = parseCombinedCredentials(process.env.CN_AGENT_CREDENTIALS);
   if (combined) {
-    console.log('[pets-browser] Using credentials from PB_AGENT_CREDENTIALS.');
+    console.log('[clawnet] Using credentials from CN_AGENT_CREDENTIALS.');
     return combined;
   }
 
-  const agentId = process.env.PB_AGENT_ID?.trim();
-  const agentSecret = process.env.PB_AGENT_SECRET?.trim();
-  const recoveryCode = process.env.PB_AGENT_RECOVERY_CODE?.trim();
+  const agentId = process.env.CN_AGENT_ID?.trim();
+  const agentSecret = process.env.CN_AGENT_SECRET?.trim();
+  const recoveryCode = process.env.CN_AGENT_RECOVERY_CODE?.trim();
 
   if (!agentId) {
     return null;
@@ -174,15 +174,15 @@ function readCredentialsFromEnv() {
   if (agentSecret) {
     const creds = { agentId, agentSecret, recoveryCode };
     if (validateCredentials(creds)) {
-      console.log('[pets-browser] Using agentId/agentSecret from environment.');
+      console.log('[clawnet] Using agentId/agentSecret from environment.');
       return creds;
     }
-    console.warn('[pets-browser] Ignoring invalid PB_AGENT_ID/PB_AGENT_SECRET format.');
+    console.warn('[clawnet] Ignoring invalid CN_AGENT_ID/CN_AGENT_SECRET format.');
     return null;
   }
 
   if (recoveryCode && AGENT_ID_RE.test(agentId) && RECOVERY_CODE_RE.test(recoveryCode)) {
-    console.log('[pets-browser] PB_AGENT_ID + PB_AGENT_RECOVERY_CODE detected. Generating a new agentSecret.');
+    console.log('[clawnet] CN_AGENT_ID + CN_AGENT_RECOVERY_CODE detected. Generating a new agentSecret.');
     return {
       agentId,
       agentSecret: generateAgentSecret(),
@@ -202,7 +202,7 @@ async function promptForExistingCredentials() {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
     rl.question(
-      '[pets-browser] Paste existing credentials (<agentId>:<agentSecret>[:recoveryCode]) or press Enter for new: ',
+      '[clawnet] Paste existing credentials (<agentId>:<agentSecret>[:recoveryCode]) or press Enter for new: ',
       (answer) => {
         rl.close();
         const parsed = parseCombinedCredentials(answer);
@@ -211,7 +211,7 @@ async function promptForExistingCredentials() {
           return;
         }
         if (!parsed) {
-          console.warn('[pets-browser] Invalid format. Expected: <agentId>:<agentSecret>[:recoveryCode].');
+          console.warn('[clawnet] Invalid format. Expected: <agentId>:<agentSecret>[:recoveryCode].');
           resolve(null);
           return;
         }
@@ -227,7 +227,7 @@ async function promptForExistingCredentials() {
 }
 
 async function rotateSecretWithApi(credentials) {
-  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
+  const apiUrl = process.env.CN_API_URL || DEFAULT_API_URL;
   if (!apiUrl || !credentials.recoveryCode) {
     return false;
   }
@@ -246,7 +246,7 @@ async function rotateSecretWithApi(credentials) {
     });
 
     if (resp.ok) {
-      console.log('[pets-browser] Agent secret rotated using recovery code.');
+      console.log('[clawnet] Agent secret rotated using recovery code.');
       return true;
     }
 
@@ -257,7 +257,7 @@ async function rotateSecretWithApi(credentials) {
 }
 
 async function registerWithApi(credentials) {
-  const apiUrl = process.env.PB_API_URL || DEFAULT_API_URL;
+  const apiUrl = process.env.CN_API_URL || DEFAULT_API_URL;
 
   const url = `${apiUrl.replace(/\/$/, '')}/agents/register`;
 
@@ -276,7 +276,7 @@ async function registerWithApi(credentials) {
     if (resp.ok) {
       const data = await resp.json();
       console.log(
-        `[pets-browser] Agent ${data.created ? 'registered' : 'validated'}. Trial: ${data.trialLimit ?? 1} free session(s).`
+        `[clawnet] Agent ${data.created ? 'registered' : 'validated'}. Trial: ${data.trialLimit ?? 1} free session(s).`
       );
       return;
     }
@@ -289,9 +289,9 @@ async function registerWithApi(credentials) {
     }
 
     const text = await resp.text().catch(() => '');
-    console.warn(`[pets-browser] API registration returned ${resp.status}: ${text}`);
+    console.warn(`[clawnet] API registration returned ${resp.status}: ${text}`);
   } catch (err) {
-    console.warn(`[pets-browser] Could not reach API: ${err.message}`);
+    console.warn(`[clawnet] Could not reach API: ${err.message}`);
     console.warn('  Agent will work in BYO mode (bring your own proxy/captcha keys).');
   }
 }
@@ -310,9 +310,9 @@ async function resolveCredentials() {
   // Security: if the credentials directory already exists, an agent was
   // previously registered. Refuse to silently generate new ones.
   if (fs.existsSync(CREDENTIALS_DIR) || fs.existsSync(CREDENTIALS_FILE)) {
-    console.error('[pets-browser] Agent account already exists. Cannot generate new credentials.');
+    console.error('[clawnet] Agent account already exists. Cannot generate new credentials.');
     console.error('  Provide existing credentials via:');
-    console.error('    PB_AGENT_CREDENTIALS=<agentId>:<agentSecret>');
+    console.error('    CN_AGENT_CREDENTIALS=<agentId>:<agentSecret>');
     console.error('  Or paste them when prompted above.');
     process.exit(1);
   }
@@ -327,7 +327,7 @@ async function resolveCredentials() {
 async function main() {
   console.log('');
   console.log('  ┌─────────────────────────────────────────┐');
-  console.log('  │  Pets Browser - Setup                    │');
+  console.log('  │  Clawnet - Setup                    │');
   console.log('  │  Stealth Chromium for AI agents          │');
   console.log('  └─────────────────────────────────────────┘');
   console.log('');
@@ -336,10 +336,10 @@ async function main() {
 
   const saved = readSavedCredentials();
   if (saved) {
-    console.log('[pets-browser] Agent credentials already configured.');
+    console.log('[clawnet] Agent credentials already configured.');
     console.log(`  agentId: ${saved.agentId}`);
     await registerWithApi(saved);
-    console.log('[pets-browser] Setup complete.');
+    console.log('[clawnet] Setup complete.');
     return;
   }
 
@@ -347,14 +347,14 @@ async function main() {
   const savedCredentials = saveCredentials(credentials);
   await registerWithApi(savedCredentials);
 
-  console.log('[pets-browser] Setup complete. Usage:');
+  console.log('[clawnet] Setup complete. Usage:');
   console.log('');
-  console.log("  const { launchBrowser } = require('pets-browser/scripts/browser');");
+  console.log("  const { launchBrowser } = require('clawnet/scripts/browser');");
   console.log("  const { page } = await launchBrowser({ country: 'us' });");
   console.log('');
 }
 
 main().catch(err => {
-  console.error('[pets-browser] Setup error:', err.message);
+  console.error('[clawnet] Setup error:', err.message);
   process.exit(0);
 });

@@ -1,5 +1,5 @@
 {
-  "name": "pets-browser",
+  "name": "clawnet",
   "version": "1.0.0",
   "description": "Stealth Chromium for AI agents: anti-detection, residential proxies, CAPTCHA solving",
   "main": "./scripts/browser.js",
@@ -31,9 +31,9 @@
     "2captcha"
   ],
   "license": "MIT",
-  "author": "al1enjesus",
+  "author": "ekenesbek",
   "repository": {
     "type": "git",
-    "url": "https://github.com/al1enjesus/pets-browser"
+    "url": "https://github.com/ekenesbek/clawnet"
   }
 }
