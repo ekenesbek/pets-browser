@@ -109,6 +109,145 @@ Only use CSS selectors when:
 - You need to target by `data-testid` or other test attributes
 - Shadow DOM elements not reachable by semantic locators (use `shadowFill`/`shadowClickButton`)
 
+## Multi-tab — parallel tasks
+
+Use multiple tabs only when the user needs **different websites open at the same time**. One tab per website/service — not one tab per action.
+
+### When to open a new tab vs reuse the current one
+
+**New tab** — different website or service that the user may want to come back to:
+- "Order a taxi AND book a restaurant" → 2 tabs (Uber + OpenTable)
+- "Compare prices on Amazon and eBay" → 2 tabs
+
+**Same tab** — same website, sequential actions:
+- "Order a taxi for me, then for my friend" → 1 tab (Uber), two orders one after another
+- "Book a table for Saturday, then book another for Sunday" → 1 tab (OpenTable), two bookings
+- "Search for Air Jordans, then search for Nike Dunks" → 1 tab (Nike), two searches
+
+**Think like a human:** you wouldn't open a second Uber tab to order a second ride. You'd finish the first ride, then start the second one in the same tab.
+
+### Opening tabs
+
+`launchBrowser()` gives you the first tab. Open more with `newTab()`:
+
+```javascript
+const { launchBrowser } = require('clawnet/scripts/browser');
+
+// First tab — comes from launchBrowser()
+const taxi = await launchBrowser({ country: 'us', mobile: false });
+await taxi.page.goto('https://uber.com');
+
+// Open more tabs — each returns its own result object
+const resto = await taxi.newTab({ url: 'https://opentable.com', label: 'restaurant' });
+const shop  = await taxi.newTab({ url: 'https://nike.com', label: 'sneakers' });
+```
+
+Each tab object (`taxi`, `resto`, `shop`) has the **full API**: `page.goto()`, `snapshotAI()`, `clickRef()`, `fillRef()`, `takeScreenshot()`, etc. — all scoped to that tab.
+
+### Working with tabs
+
+**Rule: keep a named variable per tab.** This is how you "remember" which tab is which.
+
+```javascript
+// Work on the taxi tab
+await taxi.page.goto('https://uber.com/ride');
+const { snapshot } = await taxi.snapshotAI();
+await taxi.fillRef('e5', '123 Main St');        // pickup address
+await taxi.clickRef('e9');                       // "Request ride"
+
+// Switch to the restaurant tab — just use the variable
+const { snapshot: restoSnap } = await resto.snapshotAI();
+await resto.fillRef('e3', '2 guests');
+await resto.fillRef('e4', 'March 8, 7pm');
+await resto.clickRef('e7');                      // "Find a table"
+
+// Switch to sneakers
+await shop.snapshotAI();
+await shop.clickRef('e12');                      // "Air Jordan 1"
+```
+
+No explicit "switch tab" call needed — just use the right variable. Each variable is bound to its tab.
+
+### Checking all tabs
+
+```javascript
+const { tabs } = await taxi.listTabs();
+// [
+//   { tabId: "t_a1b2c3", url: "https://uber.com/ride", label: "", active: false },
+//   { tabId: "t_d4e5f6", url: "https://opentable.com/...", label: "restaurant", active: false },
+//   { tabId: "t_g7h8i9", url: "https://nike.com/...", label: "sneakers", active: true },
+// ]
+```
+
+### Going back to a tab
+
+If you lost the variable (e.g., across script invocations), use `switchTab(tabId)`:
+
+```javascript
+// From listTabs() you know the tabId
+const uberTab = await taxi.switchTab('t_a1b2c3');
+await uberTab.snapshotAI();  // see what's on the Uber tab now
+```
+
+### Closing a tab
+
+```javascript
+await shop.closeTab();  // close the sneakers tab
+// shop variable is now stale — don't use it
+```
+
+### Multi-tab workflow pattern
+
+When the user gives you multiple parallel tasks:
+
+1. **Plan** — identify separate tasks (taxi, restaurant, sneakers)
+2. **Open tabs** — one `newTab()` per task, save each to a named variable
+3. **Work round-robin** — do a chunk of work on each tab, take screenshots
+4. **Report** — show the user screenshots from each tab so they see all progress
+5. **Go back** — when the user says "cancel the taxi" or "check the menu", switch to the right tab variable
+
+### Example: user says "Order a taxi, book a table, and find sneakers"
+
+```javascript
+// Phase 1: open all tabs
+const taxi  = await launchBrowser({ country: 'us', mobile: false });
+const resto = await taxi.newTab({ url: 'https://opentable.com' });
+const shop  = await taxi.newTab({ url: 'https://nike.com' });
+
+// Phase 2: start each task
+await taxi.page.goto('https://uber.com');
+await taxi.fillRef('e3', 'Airport');         // destination
+const taxiSS = await taxi.takeScreenshot();
+
+await resto.fillRef('e2', 'Italian');        // cuisine search
+await resto.clickRef('e5');                  // search
+const restoSS = await resto.takeScreenshot();
+
+await shop.fillRef('e1', 'Air Jordan');      // search
+await shop.clickRef('e3');                   // search button
+const shopSS = await shop.takeScreenshot();
+
+// Phase 3: report to user (ALL tabs' screenshots)
+// "Here's what I've set up: [taxi screenshot] [restaurant screenshot] [shop screenshot]"
+
+// Phase 4: user says "cancel the taxi, check restaurant prices"
+await taxi.clickRef('e15');                  // "Cancel" button
+const cancelSS = await taxi.takeScreenshot();
+
+const { text } = await resto.extractText();  // read menu prices
+const pricesSS = await resto.takeScreenshot();
+```
+
+### Key rules
+
+- **One tab per website/service** — not one tab per action. Sequential tasks on the same site happen in one tab
+- **New tab only for a different site** that the user may want to come back to
+- **One variable per tab** — don't reuse variables, name them by purpose
+- **Tabs share cookies** — login on one tab is visible on all tabs (same browser context)
+- **Screenshots from each tab** — always show the user what's happening on each tab
+- **Don't open too many tabs** — 2-4 is practical, more gets confusing for both you and the user
+- **Tabs survive between script runs** — the daemon keeps them alive. Use `listTabs()` to rediscover them
+
 ## Screenshot rules
 
 **ALWAYS attach a screenshot when communicating with the user.** The user cannot see the browser — you are their eyes. Every message to the user MUST include a screenshot. No exceptions.
@@ -301,28 +440,75 @@ TWOCAPTCHA_KEY=your-2captcha-key
 CN_NO_PROXY=1
 ```
 
+## Browser lifecycle
+
+**DO NOT close the browser between steps.** The browser persists automatically via a background daemon. Just call `launchBrowser()` at the start of each script — it reconnects to the existing browser with all your tabs, cookies, and login sessions intact.
+
+```javascript
+// Script 1: agent logs into a site
+const b = await launchBrowser({ country: 'us' });
+await b.page.goto('https://example.com/login');
+await b.fillRef('e2', 'user@example.com');
+await b.clickRef('e5');
+// Script ends — browser stays alive
+
+// Script 2 (later): agent continues where it left off
+const b = await launchBrowser({ country: 'us' });
+// Same browser, same tab, same cookies — still logged in
+await b.snapshotAI();  // sees the logged-in page
+```
+
+### What NOT to do
+
+```javascript
+// BAD — kills the browser, loses all state
+await browser.close();
+await closeBrowser();
+
+// BAD — opening a new browser when you already have one
+const b1 = await launchBrowser();
+// ... do some work ...
+const b2 = await launchBrowser();  // this REUSES b1, doesn't create a new browser
+```
+
+### When to actually close
+
+Only close the browser when the user explicitly says they're done with ALL browser tasks:
+- "Close the browser"
+- "I'm done, clean up"
+- "Shut everything down"
+
+Otherwise, leave it running. The daemon auto-shuts down after 5 minutes of inactivity anyway.
+
 ## Quick start
 
 ```javascript
 const { launchBrowser, solveCaptcha } = require('clawnet/scripts/browser');
 
 // Launch stealth browser with US residential proxy
-const { browser, page, humanType, humanClick } = await launchBrowser({
+const b = await launchBrowser({
   country: 'us',
   mobile: false,    // Desktop Chrome (true = iPhone 15 Pro)
   headless: true,
 });
 
 // Browse normally — anti-detection is automatic
-await page.goto('https://example.com');
+await b.page.goto('https://example.com');
 
-// Human-like typing (variable speed, micro-pauses)
-await humanType(page, 'input[name="email"]', 'user@example.com');
+// Read the page
+const { snapshot } = await b.snapshotAI();
+
+// Interact by ref
+await b.fillRef('e4', 'user@example.com');
+await b.clickRef('e6');
 
 // Solve CAPTCHA if present
-const result = await solveCaptcha(page, { verbose: true });
+const result = await b.solveCaptcha({ verbose: true });
 
-await browser.close();
+// Take a screenshot for the user
+const ss = await b.takeScreenshot();
+
+// DO NOT close — browser stays alive for the next step
 ```
 
 ## API Reference
@@ -353,7 +539,7 @@ Launch a stealth Chromium browser with residential proxy.
 | `logLevel` | string | `'actions'` | `'off'` \| `'actions'` \| `'verbose'`. Env: `CN_LOG_LEVEL` |
 | `task` | string | `null` | User's prompt / task description. Recorded in the session log for context. |
 
-Returns: `{ browser, ctx, page, logger, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, takeScreenshot, screenshotAndReport, snapshot, snapshotAI, dumpInteractiveElements, clickRef, fillRef, typeRef, selectRef, hoverRef, extractText, getCookies, setCookies, clearCookies, batchActions, sleep, rand, getSessionLog }`
+Returns: `{ browser, ctx, page, logger, tabId, newTab, listTabs, closeTab, switchTab, humanClick, humanMouseMove, humanType, humanScroll, humanRead, solveCaptcha, takeScreenshot, screenshotAndReport, snapshot, snapshotAI, dumpInteractiveElements, clickRef, fillRef, typeRef, selectRef, hoverRef, extractText, getCookies, setCookies, clearCookies, batchActions, sleep, rand, getSessionLog }`
 
 ### `solveCaptcha(page, opts)`
 
@@ -449,6 +635,48 @@ await browser.selectRef('e5', 'US');
 
 ```javascript
 await browser.hoverRef('e1');  // reveal tooltip/dropdown
+```
+
+### `newTab(opts)` — Open a new tab
+
+Opens a new browser tab and returns a **new result object** scoped to that tab. All methods on the returned object (page.goto, snapshotAI, clickRef, etc.) operate on the new tab.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `url` | string | - | Navigate to this URL immediately |
+| `label` | string | `''` | Human-readable label for the tab |
+
+```javascript
+const tab2 = await browser.newTab({ url: 'https://opentable.com', label: 'restaurant' });
+await tab2.snapshotAI();  // snapshot of opentable.com
+```
+
+### `listTabs()` — List all open tabs
+
+Returns all open tabs with their IDs, URLs, labels, and active status.
+
+```javascript
+const { tabs } = await browser.listTabs();
+// [{ tabId: "t_abc", url: "https://...", label: "restaurant", active: true, createdAt: "..." }]
+```
+
+### `closeTab(tabId?)` — Close a tab
+
+Closes the specified tab (or the current tab if no tabId given).
+
+```javascript
+await tab2.closeTab();           // close this tab
+await browser.closeTab('t_abc'); // close by ID
+```
+
+### `switchTab(tabId)` — Switch to a tab
+
+Returns a new result object scoped to the specified tab. Use when you need to return to a tab whose variable you lost (e.g., across script invocations).
+
+```javascript
+const { tabs } = await browser.listTabs();
+const uberTab = await browser.switchTab(tabs[0].tabId);
+await uberTab.snapshotAI();
 ```
 
 ### `extractText(opts)` (from launchBrowser return) / `extractText(page, opts)`

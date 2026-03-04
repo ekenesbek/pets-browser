@@ -1056,6 +1056,241 @@ async function solveCaptcha(page, opts = {}) {
   return { token, type: detected.type, sitekey: detected.sitekey };
 }
 
+// ─── DAEMON CLIENT ──────────────────────────────────────────────────────────
+// Persistent browser daemon: keeps Chromium alive between short-lived scripts.
+// When CN_DAEMON=1 (or auto-detected), launchBrowser() connects to the daemon
+// HTTP server instead of launching Chromium in-process.
+
+const DAEMON_FILE = _path.join(_os.homedir(), '.clawnet', 'daemon.json');
+const DAEMON_SCRIPT = _path.join(__dirname, 'browser-daemon.js');
+const DAEMON_STARTUP_TIMEOUT = 15_000; // max ms to wait for daemon to become healthy
+
+/**
+ * Check if the daemon process is alive.
+ * @returns {{ pid: number, port: number } | null}
+ */
+function _readDaemonInfo() {
+  try {
+    if (!_fs.existsSync(DAEMON_FILE)) return null;
+    const info = JSON.parse(_fs.readFileSync(DAEMON_FILE, 'utf-8'));
+    if (!info.pid || !info.port) return null;
+    // Check if process is alive
+    try { process.kill(info.pid, 0); } catch (_) { return null; }
+    return info;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Send a POST request to the daemon.
+ */
+async function _daemonPost(port, endpoint, body = {}) {
+  const resp = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const data = await resp.json();
+  if (!resp.ok || data.error) {
+    throw new Error(data.error || `Daemon ${endpoint} failed (HTTP ${resp.status})`);
+  }
+  return data;
+}
+
+/**
+ * Check daemon health via GET /health.
+ * @returns {boolean}
+ */
+async function _daemonHealthy(port) {
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    const data = await resp.json();
+    return data.ok === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Spawn the daemon as a detached child process and wait for it to become healthy.
+ * @returns {{ pid: number, port: number }}
+ */
+async function _spawnDaemon() {
+  const { spawn } = require('child_process');
+
+  // Find node executable
+  const nodeExe = process.execPath;
+
+  console.log('[clawnet:daemon] Starting daemon...');
+  const child = spawn(nodeExe, [DAEMON_SCRIPT], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env },
+  });
+  child.unref();
+
+  // Wait for daemon.json to appear and health check to pass
+  const deadline = Date.now() + DAEMON_STARTUP_TIMEOUT;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 300));
+    const info = _readDaemonInfo();
+    if (info && await _daemonHealthy(info.port)) {
+      console.log(`[clawnet:daemon] Daemon ready on port ${info.port} (pid ${info.pid})`);
+      return info;
+    }
+  }
+  throw new Error('[clawnet:daemon] Daemon failed to start within timeout');
+}
+
+/**
+ * Connect to an existing daemon or spawn a new one.
+ * @returns {{ port: number, pid: number }}
+ */
+async function _connectDaemon() {
+  // Try existing daemon first
+  const existing = _readDaemonInfo();
+  if (existing && await _daemonHealthy(existing.port)) {
+    console.log(`[clawnet:daemon] Reusing daemon on port ${existing.port} (pid ${existing.pid})`);
+    return existing;
+  }
+  // Spawn new daemon
+  return _spawnDaemon();
+}
+
+/**
+ * Build a result object that proxies all calls through the daemon HTTP API.
+ * Has the same interface as buildResult() so the agent sees no difference.
+ *
+ * Multi-tab: the returned object has a `tabId` property. When the agent opens
+ * a new tab via `newTab()`, it gets a new result with its own tabId.
+ * All actions are scoped to that tab automatically.
+ */
+function buildDaemonResult(daemonPort, logger, tabId = null) {
+  const post = (endpoint, body) => _daemonPost(daemonPort, endpoint, body);
+
+  // All action calls include tabId so the daemon knows which tab to target
+  const _t = (extra) => tabId ? { tabId, ...extra } : extra;
+
+  // Create a page-like proxy object
+  const page = {
+    goto:    (url, opts) => post('/goto', _t({ url, ...(opts || {}) })),
+    url:     () => fetch(`http://127.0.0.1:${daemonPort}/health`)
+                    .then(r => r.json())
+                    .then(d => {
+                      const tab = (d.tabs || []).find(t => t.tabId === (tabId || d.activeTabId));
+                      return tab?.url || '';
+                    }).catch(() => ''),
+    waitForTimeout: (ms) => post('/wait', _t({ ms })),
+    evaluate: (expression) => post('/eval', _t({
+      expression: typeof expression === 'string' ? expression : `(${expression.toString()})()`,
+    })).then(r => r.result),
+
+    // Locator-based methods proxied through batchActions
+    click:        (sel, opts) => post('/batchActions', _t({ actions: [{ action: 'click', selector: sel, options: opts }] })),
+    fill:         (sel, text) => post('/batchActions', _t({ actions: [{ action: 'fill', selector: sel, text }] })),
+    type:         (sel, text, opts) => post('/batchActions', _t({ actions: [{ action: 'type', selector: sel, text, options: opts }] })),
+    press:        (sel, key) => post('/batchActions', _t({ actions: [{ action: 'press', selector: sel, key }] })),
+    hover:        (sel, opts) => post('/batchActions', _t({ actions: [{ action: 'hover', selector: sel, options: opts }] })),
+    selectOption: (sel, val) => post('/batchActions', _t({ actions: [{ action: 'select', selector: sel, value: val }] })),
+    waitForSelector: (sel, opts) => post('/batchActions', _t({ actions: [{ action: 'waitForSelector', selector: sel, options: opts }] })),
+
+    // Screenshot
+    screenshot: (opts) => post('/screenshot', _t(opts || {})).then(r => Buffer.from(r.base64, 'base64')),
+  };
+
+  return {
+    browser: null,  // not available in daemon mode
+    ctx:     null,
+    page,
+    logger,
+    _daemonPort: daemonPort,
+    _isDaemon: true,
+    tabId,
+
+    // ── Tab management ──
+    // Open a new tab (optionally navigate to url).
+    // Returns a NEW result object scoped to the new tab.
+    newTab: async (opts = {}) => {
+      const r = await post('/newTab', opts);
+      logger.log('newTab', { tabId: r.tabId, url: opts.url });
+      return buildDaemonResult(daemonPort, logger, r.tabId);
+    },
+    // List all open tabs
+    listTabs: () => post('/listTabs', {}),
+    // Close a specific tab (defaults to this tab)
+    closeTab: (id) => post('/closeTab', { tabId: id || tabId }),
+    // Switch active tab (returns result scoped to that tab)
+    switchTab: async (id) => {
+      await post('/switchTab', { tabId: id });
+      return buildDaemonResult(daemonPort, logger, id);
+    },
+
+    // Human-like interaction
+    humanClick:     async (pg, x, y) => post('/batchActions', _t({ actions: [{ action: 'humanClick', selector: `body` }] })),
+    humanMouseMove: async () => {},
+    humanType:      async (pg, sel, text) => post('/batchActions', _t({ actions: [{ action: 'humanType', selector: sel, text }] })),
+    humanScroll:    async () => post('/eval', _t({ expression: 'window.scrollBy(0, 400)' })),
+    humanRead:      async () => post('/wait', _t({ ms: 2000 })),
+
+    solveCaptcha: async () => {
+      throw new Error('[daemon] solveCaptcha not yet supported in daemon mode. Use direct mode.');
+    },
+
+    takeScreenshot: async (opts) => {
+      const r = await post('/screenshot', _t(opts || {}));
+      return r.base64;
+    },
+
+    screenshotAndReport: async (message, opts) => {
+      const r = await post('/screenshot', _t(opts || {}));
+      return { message, screenshot: r.base64, mimeType: 'image/png' };
+    },
+
+    // Observation layer
+    snapshot:                (opts) => post('/snapshot', _t(opts || {})).then(r => r.snapshot),
+    snapshotAI:              (opts) => post('/snapshotAI', _t(opts || {})),
+    dumpInteractiveElements: (opts) => post('/snapshot', _t({ ...(opts || {}), interactiveOnly: true })).then(r => r.snapshot),
+
+    // Ref-based interactions
+    clickRef:  (ref, opts) => post('/clickRef',  _t({ ref, ...(opts || {}) })),
+    fillRef:   (ref, value, opts) => post('/fillRef',  _t({ ref, value, ...(opts || {}) })),
+    typeRef:   (ref, text, opts) => post('/typeRef',   _t({ ref, text, ...(opts || {}) })),
+    selectRef: (ref, value, opts) => post('/selectRef', _t({ ref, value, ...(opts || {}) })),
+    hoverRef:  (ref, opts) => post('/hoverRef',  _t({ ref, ...(opts || {}) })),
+
+    // Text extraction
+    extractText: (opts) => post('/extractText', _t(opts || {})),
+
+    // Cookie management (context-level, shared across tabs)
+    getCookies:   (urls) => post('/getCookies', { urls }).then(r => r.cookies),
+    setCookies:   (cookies) => post('/setCookies', { cookies }),
+    clearCookies: () => post('/clearCookies', {}),
+
+    // Batch actions
+    batchActions: (actions, opts) => post('/batchActions', _t({ actions, ...(opts || {}) })),
+
+    sleep,
+    rand,
+    getSessionLog: () => logger.getLog(),
+  };
+}
+
+/**
+ * Whether daemon mode is enabled.
+ * Auto-enabled inside Docker/container runtimes, or when CN_DAEMON=1.
+ */
+function isDaemonEnabled() {
+  const env = process.env.CN_DAEMON?.trim().toLowerCase();
+  if (env === '1' || env === 'true' || env === 'yes') return true;
+  if (env === '0' || env === 'false' || env === 'no') return false;
+  // Auto-enable in Docker / container runtimes where process dies between steps
+  return isDockerRuntime();
+}
+
 // ─── LAUNCH ───────────────────────────────────────────────────────────────────
 
 /**
@@ -1456,6 +1691,26 @@ async function launchBrowser(opts = {}) {
   logger.log('launch', { country: cty, mobile, profile: profileName, useProxy, headless, logLevel: level });
   if (task) logger.log('task', { prompt: typeof task === 'string' ? task : JSON.stringify(task) });
 
+  // ── Daemon mode: persistent browser via HTTP ──
+  // When running inside containers where each step is a separate process,
+  // delegate to the browser daemon so Chromium survives between invocations.
+  if (isDaemonEnabled()) {
+    logger.log('daemon', { mode: 'connecting' });
+    try {
+      const daemon = await _connectDaemon();
+      // Tell daemon to launch browser (no-op if already launched)
+      const launchResult = await _daemonPost(daemon.port, '/launch', {
+        country: cty, mobile, useProxy, headless, profile: profileName,
+      });
+      logger.log('daemon', { mode: 'connected', port: daemon.port, pid: daemon.pid, tabId: launchResult.tabId });
+      console.log(`[clawnet] Connected to daemon (port ${daemon.port}, tab ${launchResult.tabId})`);
+      return buildDaemonResult(daemon.port, logger, launchResult.tabId);
+    } catch (err) {
+      console.warn(`[clawnet:daemon] Daemon mode failed: ${err.message} — falling back to direct launch`);
+      logger.log('daemon_fallback', { error: err.message });
+    }
+  }
+
   // ── Reuse: return existing browser if alive ──
   // Reuse is only safe when requested proxy mode matches the live context.
   // Playwright cannot swap proxy config on an already running context.
@@ -1578,6 +1833,15 @@ async function launchBrowser(opts = {}) {
  * @param {string} profile — Profile name to close (default: 'default')
  */
 async function closeBrowser(profile = 'default') {
+  // If daemon mode is active, tell the daemon to shut down
+  if (isDaemonEnabled()) {
+    const info = _readDaemonInfo();
+    if (info) {
+      try { await _daemonPost(info.port, '/close'); } catch (_) {}
+    }
+    return;
+  }
+
   const active = _activeBrowsers.get(profile);
   if (!active) return;
   _activeBrowsers.delete(profile);
@@ -2125,8 +2389,8 @@ module.exports = {
   // Rich text editors
   pasteIntoEditor,
 
-  // Internals (exposed for advanced users)
-  makeProxy, buildDevice,
+  // Internals (exposed for advanced users / daemon)
+  makeProxy, buildDevice, resolveAgentCredentials,
 
   // Logging
   getSessionLogs, getSessionLog,
