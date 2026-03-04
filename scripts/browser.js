@@ -1273,6 +1273,9 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
       if (typeof copy.screenshot === 'string' && copy.screenshot.length > 120) {
         copy.screenshot = `<base64:${copy.screenshot.length} chars>`;
       }
+      if (typeof copy.expression === 'string' && copy.expression.length > 220) {
+        copy.expression = copy.expression.slice(0, 220) + '…';
+      }
       if (Array.isArray(copy.actions)) {
         copy.actions = copy.actions.map((a) => {
           const next = { ...a };
@@ -1318,6 +1321,7 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
       });
   };
   const selectorEnabled = areSelectorActionsEnabled();
+  const evalEnabled = _readBoolEnv('CN_ALLOW_EVAL') === true;
   const rejectSelectorAction = () => {
     throw new Error(REF_ONLY_ACTION_MESSAGE);
   };
@@ -1336,9 +1340,16 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
                       return tab?.url || '';
                     }).catch(() => ''),
     waitForTimeout: (ms) => post('/wait', _t({ ms })),
-    evaluate: (expression) => post('/eval', _t({
-      expression: typeof expression === 'string' ? expression : `(${expression.toString()})()`,
-    })).then(r => r.result),
+    evaluate: (expression) => {
+      if (!evalEnabled) {
+        throw new Error(
+          '[clawnet] page.evaluate is disabled in daemon mode. Use snapshotAI() + ref actions, or set CN_ALLOW_EVAL=1.'
+        );
+      }
+      return post('/eval', _t({
+        expression: typeof expression === 'string' ? expression : `(${expression.toString()})()`,
+      })).then(r => r.result);
+    },
 
     // Selector-based page methods are disabled by default for reliability.
     click:        (sel, opts) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'click', selector: sel, options: opts }] })) : rejectSelectorAction(),

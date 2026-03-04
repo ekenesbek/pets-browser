@@ -67,6 +67,19 @@ function _selectorActionsError(action) {
   return `${lib.REF_ONLY_ACTION_MESSAGE} (action="${action}")`;
 }
 
+function _readBoolEnv(name) {
+  const raw = process.env[name];
+  if (raw == null) return null;
+  const value = String(raw).trim().toLowerCase();
+  if (value === '1' || value === 'true' || value === 'yes') return true;
+  if (value === '0' || value === 'false' || value === 'no') return false;
+  return null;
+}
+
+function _isEvalAllowed() {
+  return _readBoolEnv('CN_ALLOW_EVAL') === true;
+}
+
 function _assertBatchActionsAllowed(actions) {
   const lib = _browserLib();
   if (lib.areSelectorActionsEnabled()) return;
@@ -467,6 +480,12 @@ async function handleBatchActions(body) {
 }
 
 async function handleEval(body) {
+  if (!_isEvalAllowed()) {
+    return {
+      error:
+        '[daemon] /eval is disabled by default. Use snapshotAI() + clickRef()/fillRef()/typeRef() or set CN_ALLOW_EVAL=1.',
+    };
+  }
   const page = _resolveTabPage(body.tabId);
   const { expression } = body;
   if (!expression) return { error: 'expression required' };
