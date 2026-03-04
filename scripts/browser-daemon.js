@@ -449,6 +449,13 @@ async function handleExtractText(body) {
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
 
+async function handleSolveCaptcha(body) {
+  const page = _resolveTabPage(body.tabId);
+  const browserLib = _browserLib();
+  const result = await browserLib.solveCaptcha(page, body || {});
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url(), ...result };
+}
+
 async function handleBatchActions(body) {
   const page = _resolveTabPage(body.tabId);
   const { actions, stopOnError = false, delayBetween = 50 } = body;
@@ -543,6 +550,7 @@ const ROUTES = {
   '/pageErrors':   handlePageErrors,
   '/networkRequests': handleNetworkRequests,
   '/extractText':  handleExtractText,
+  '/solveCaptcha': handleSolveCaptcha,
   '/batchActions': handleBatchActions,
   '/eval':         handleEval,
   '/wait':         handleWait,

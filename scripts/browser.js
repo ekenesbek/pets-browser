@@ -876,6 +876,10 @@ async function humanRead(page, minMs = 1500, maxMs = 4000) {
  * @returns {Promise<{results: Array<{index: number, success: boolean, result?: any, error?: string}>, total: number, successful: number, failed: number}>}
  */
 async function batchActions(page, actions, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    return _daemonPagePost(page, '/batchActions', { actions, ...(opts || {}) });
+  }
+
   const { stopOnError = false, delayBetween = 50 } = opts;
   const selectorEnabled = areSelectorActionsEnabled();
   const results = [];
@@ -1180,6 +1184,14 @@ async function _daemonPost(port, endpoint, body = {}) {
   return data;
 }
 
+function _isDaemonPageProxy(page) {
+  return !!(page && page.__clawnetDaemonProxy === true && typeof page.__clawnetPost === 'function');
+}
+
+function _daemonPagePost(page, endpoint, body = {}) {
+  return page.__clawnetPost(endpoint, body);
+}
+
 /**
  * Check daemon health via GET /health.
  * @returns {boolean}
@@ -1312,6 +1324,7 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
 
   // All action calls include tabId so the daemon knows which tab to target
   const _t = (extra) => tabId ? { tabId, ...extra } : extra;
+  const daemonPagePost = (endpoint, body = {}) => post(endpoint, _t(body));
 
   // Create a page-like proxy object
   const page = {
@@ -1343,6 +1356,8 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
     // Screenshot
     screenshot: (opts) => post('/screenshot', _t(opts || {})).then(r => Buffer.from(r.base64, 'base64')),
   };
+  Object.defineProperty(page, '__clawnetDaemonProxy', { value: true });
+  Object.defineProperty(page, '__clawnetPost', { value: daemonPagePost });
 
   return {
     browser: null,  // not available in daemon mode
@@ -1378,9 +1393,7 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
     humanScroll:    async () => post('/eval', _t({ expression: 'window.scrollBy(0, 400)' })),
     humanRead:      async () => post('/wait', _t({ ms: 2000 })),
 
-    solveCaptcha: async () => {
-      throw new Error('[daemon] solveCaptcha not yet supported in daemon mode. Use direct mode.');
-    },
+    solveCaptcha: (captchaOpts) => post('/solveCaptcha', _t(captchaOpts || {})),
 
     takeScreenshot: async (opts) => {
       const r = await post('/screenshot', _t(opts || {}));
@@ -2529,6 +2542,11 @@ function limitDepth(text, maxDepth) {
  * @returns {Promise<string>} YAML accessibility tree
  */
 async function snapshot(page, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    const result = await _daemonPagePost(page, '/snapshot', opts || {});
+    return String(result?.snapshot || '');
+  }
+
   const {
     selector = 'body',
     interactiveOnly = false,
@@ -2579,6 +2597,10 @@ async function snapshot(page, opts = {}) {
  * @returns {Promise<{snapshot: string, refs: Object<string, boolean>, truncated?: boolean}>}
  */
 async function snapshotAI(page, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    return _daemonPagePost(page, '/snapshotAI', opts || {});
+  }
+
   const {
     maxChars = 20000,
     timeout = 5000,
@@ -2721,6 +2743,11 @@ function refLocator(page, ref, refMeta) {
  * @param {boolean} [opts.doubleClick=false]
  */
 async function clickRef(page, ref, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    await _daemonPagePost(page, '/clickRef', { ref, ...(opts || {}) });
+    return;
+  }
+
   const { timeout = 8000, button = 'left', doubleClick = false } = opts;
   const locator = refLocator(page, ref, opts.refMeta);
   try {
@@ -2750,6 +2777,11 @@ async function clickRef(page, ref, opts = {}) {
  * @param {number} [opts.timeout=8000]
  */
 async function fillRef(page, ref, value, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    await _daemonPagePost(page, '/fillRef', { ref, value, ...(opts || {}) });
+    return;
+  }
+
   const { timeout = 8000 } = opts;
   const locator = refLocator(page, ref, opts.refMeta);
   try {
@@ -2775,6 +2807,11 @@ async function fillRef(page, ref, value, opts = {}) {
  * @param {number} [opts.timeout=8000]
  */
 async function typeRef(page, ref, text, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    await _daemonPagePost(page, '/typeRef', { ref, text, ...(opts || {}) });
+    return;
+  }
+
   const { slowly = false, submit = false, timeout = 8000 } = opts;
   const locator = refLocator(page, ref, opts.refMeta);
   try {
@@ -2806,6 +2843,11 @@ async function typeRef(page, ref, text, opts = {}) {
  * @param {number} [opts.timeout=8000]
  */
 async function selectRef(page, ref, value, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    await _daemonPagePost(page, '/selectRef', { ref, value, ...(opts || {}) });
+    return;
+  }
+
   const { timeout = 8000 } = opts;
   const locator = refLocator(page, ref, opts.refMeta);
   try {
@@ -2828,6 +2870,11 @@ async function selectRef(page, ref, value, opts = {}) {
  * @param {number} [opts.timeout=8000]
  */
 async function hoverRef(page, ref, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    await _daemonPagePost(page, '/hoverRef', { ref, ...(opts || {}) });
+    return;
+  }
+
   const { timeout = 8000 } = opts;
   const locator = refLocator(page, ref, opts.refMeta);
   try {
@@ -2854,6 +2901,11 @@ async function hoverRef(page, ref, opts = {}) {
  * @returns {Promise<void>}
  */
 async function scrollDown(page, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    await _daemonPagePost(page, '/scrollDown', opts || {});
+    return;
+  }
+
   const px = opts.pixels || 0;
   await page.evaluate((p) => {
     window.scrollBy(0, p || window.innerHeight);
@@ -2871,6 +2923,11 @@ async function scrollDown(page, opts = {}) {
  * @returns {Promise<void>}
  */
 async function scrollUp(page, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    await _daemonPagePost(page, '/scrollUp', opts || {});
+    return;
+  }
+
   const px = opts.pixels || 0;
   await page.evaluate((p) => {
     window.scrollBy(0, -(p || window.innerHeight));
@@ -2887,6 +2944,10 @@ async function scrollUp(page, opts = {}) {
  * @returns {Promise<{dismissed: number}>}
  */
 async function dismissOverlays(page) {
+  if (_isDaemonPageProxy(page)) {
+    return _daemonPagePost(page, '/dismissOverlays', {});
+  }
+
   let dismissed = 0;
   const selectors = [
     // Cookie consent buttons (common patterns)
