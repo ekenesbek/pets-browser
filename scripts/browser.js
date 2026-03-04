@@ -1001,6 +1001,10 @@ async function batchActions(page, actions, opts = {}) {
 // ─── 2CAPTCHA SOLVER ──────────────────────────────────────────────────────────
 
 async function solveCaptcha(page, opts = {}) {
+  if (_isDaemonPageProxy(page)) {
+    return _daemonPagePost(page, '/solveCaptcha', opts || {});
+  }
+
   const {
     apiKey   = process.env.TWOCAPTCHA_KEY,
     action   = 'verify',
