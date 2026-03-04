@@ -241,6 +241,9 @@ const LOGS_DIR    = _path.join(_os.homedir(), '.clawnet', 'logs');
 const DEFAULT_PROFILE_NAME = (process.env.CN_PROFILE || 'default').trim() || 'default';
 const LOG_LEVELS  = ['off', 'actions', 'verbose'];
 const MAX_LOG_SESSIONS = 50;
+const REF_ONLY_ACTION_MESSAGE =
+  '[clawnet] Selector-based actions are disabled. Use snapshotAI() + clickRef()/fillRef()/typeRef()/selectRef()/hoverRef(). ' +
+  'Set CN_ALLOW_SELECTOR_ACTIONS=1 to re-enable selector actions.';
 
 // ─── ACTION LOGGER ───────────────────────────────────────────────────────────
 
@@ -331,8 +334,48 @@ function _truncate(val, max = 500) {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
+function _readBoolEnv(name) {
+  const raw = process.env[name];
+  if (raw == null) return null;
+  const value = String(raw).trim().toLowerCase();
+  if (value === '1' || value === 'true' || value === 'yes') return true;
+  if (value === '0' || value === 'false' || value === 'no') return false;
+  return null;
+}
+
+/**
+ * Selector-based actions are intentionally disabled by default for agent runs.
+ * They are brittle on modern SPAs; refs from snapshotAI() are preferred.
+ */
+function areSelectorActionsEnabled() {
+  const explicitAllow = _readBoolEnv('CN_ALLOW_SELECTOR_ACTIONS');
+  if (explicitAllow !== null) return explicitAllow;
+
+  const refOnly = _readBoolEnv('CN_REF_ONLY');
+  if (refOnly !== null) return !refOnly;
+
+  return false;
+}
+
+const SELECTOR_ACTIONS = new Set([
+  'click',
+  'fill',
+  'type',
+  'press',
+  'hover',
+  'select',
+  'focus',
+  'waitForSelector',
+  'humanClick',
+  'humanType',
+]);
+
+function isSelectorAction(action) {
+  return SELECTOR_ACTIONS.has(String(action || '').trim());
+}
+
 // Active browser instances keyed by profile name (for reuse mode)
-// Value: { browser, ctx, proxyEnabled }
+// Value: { browser, ctx, proxyEnabled, activePage }
 const _activeBrowsers = new Map();
 const AGENT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const AGENT_SECRET_RE = /^[A-Za-z0-9_-]{32,200}$/;
@@ -805,6 +848,7 @@ async function humanRead(page, minMs = 1500, maxMs = 4000) {
  */
 async function batchActions(page, actions, opts = {}) {
   const { stopOnError = false, delayBetween = 50 } = opts;
+  const selectorEnabled = areSelectorActionsEnabled();
   const results = [];
   let successful = 0;
   let failed = 0;
@@ -813,6 +857,10 @@ async function batchActions(page, actions, opts = {}) {
     const act = actions[i];
     try {
       let result;
+      const isGlobalPress = act.action === 'press' && !act.selector;
+      if (!selectorEnabled && isSelectorAction(act.action) && !isGlobalPress) {
+        throw new Error(`${REF_ONLY_ACTION_MESSAGE} (action="${act.action}")`);
+      }
       switch (act.action) {
         case 'click':
           await page.click(act.selector, act.options);
@@ -827,7 +875,11 @@ async function batchActions(page, actions, opts = {}) {
           result = { typed: act.selector };
           break;
         case 'press':
-          await page.press(act.selector || 'body', act.key);
+          if (act.selector) {
+            await page.press(act.selector, act.key);
+          } else {
+            await page.keyboard.press(act.key);
+          }
           result = { pressed: act.key };
           break;
         case 'hover':
@@ -1171,6 +1223,10 @@ async function _connectDaemon() {
  */
 function buildDaemonResult(daemonPort, logger, tabId = null) {
   const post = (endpoint, body) => _daemonPost(daemonPort, endpoint, body);
+  const selectorEnabled = areSelectorActionsEnabled();
+  const rejectSelectorAction = () => {
+    throw new Error(REF_ONLY_ACTION_MESSAGE);
+  };
 
   // All action calls include tabId so the daemon knows which tab to target
   const _t = (extra) => tabId ? { tabId, ...extra } : extra;
@@ -1189,14 +1245,18 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
       expression: typeof expression === 'string' ? expression : `(${expression.toString()})()`,
     })).then(r => r.result),
 
-    // Locator-based methods proxied through batchActions
-    click:        (sel, opts) => post('/batchActions', _t({ actions: [{ action: 'click', selector: sel, options: opts }] })),
-    fill:         (sel, text) => post('/batchActions', _t({ actions: [{ action: 'fill', selector: sel, text }] })),
-    type:         (sel, text, opts) => post('/batchActions', _t({ actions: [{ action: 'type', selector: sel, text, options: opts }] })),
-    press:        (sel, key) => post('/batchActions', _t({ actions: [{ action: 'press', selector: sel, key }] })),
-    hover:        (sel, opts) => post('/batchActions', _t({ actions: [{ action: 'hover', selector: sel, options: opts }] })),
-    selectOption: (sel, val) => post('/batchActions', _t({ actions: [{ action: 'select', selector: sel, value: val }] })),
-    waitForSelector: (sel, opts) => post('/batchActions', _t({ actions: [{ action: 'waitForSelector', selector: sel, options: opts }] })),
+    // Selector-based page methods are disabled by default for reliability.
+    click:        (sel, opts) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'click', selector: sel, options: opts }] })) : rejectSelectorAction(),
+    fill:         (sel, text) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'fill', selector: sel, text }] })) : rejectSelectorAction(),
+    type:         (sel, text, opts) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'type', selector: sel, text, options: opts }] })) : rejectSelectorAction(),
+    press:        (sel, key) => {
+      const isGlobalPress = !sel;
+      if (!selectorEnabled && !isGlobalPress) return rejectSelectorAction();
+      return post('/batchActions', _t({ actions: [{ action: 'press', selector: sel, key }] }));
+    },
+    hover:        (sel, opts) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'hover', selector: sel, options: opts }] })) : rejectSelectorAction(),
+    selectOption: (sel, val) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'select', selector: sel, value: val }] })) : rejectSelectorAction(),
+    waitForSelector: (sel, opts) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'waitForSelector', selector: sel, options: opts }] })) : rejectSelectorAction(),
 
     // Screenshot
     screenshot: (opts) => post('/screenshot', _t(opts || {})).then(r => Buffer.from(r.base64, 'base64')),
@@ -1230,9 +1290,9 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
     },
 
     // Human-like interaction
-    humanClick:     async (pg, x, y) => post('/batchActions', _t({ actions: [{ action: 'humanClick', selector: `body` }] })),
+    humanClick:     async (pg, x, y) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'humanClick', selector: `body` }] })) : rejectSelectorAction(),
     humanMouseMove: async () => {},
-    humanType:      async (pg, sel, text) => post('/batchActions', _t({ actions: [{ action: 'humanType', selector: sel, text }] })),
+    humanType:      async (pg, sel, text) => selectorEnabled ? post('/batchActions', _t({ actions: [{ action: 'humanType', selector: sel, text }] })) : rejectSelectorAction(),
     humanScroll:    async () => post('/eval', _t({ expression: 'window.scrollBy(0, 400)' })),
     humanRead:      async () => post('/wait', _t({ ms: 2000 })),
 
@@ -1298,14 +1358,15 @@ function buildDaemonResult(daemonPort, logger, tabId = null) {
 
 /**
  * Whether daemon mode is enabled.
- * Auto-enabled inside Docker/container runtimes, or when CN_DAEMON=1.
+ * Enabled by default for persistent multi-message browser continuity.
+ * Use CN_DAEMON=0 to disable, or CN_DAEMON=auto for legacy Docker-only behavior.
  */
 function isDaemonEnabled() {
   const env = process.env.CN_DAEMON?.trim().toLowerCase();
   if (env === '1' || env === 'true' || env === 'yes') return true;
   if (env === '0' || env === 'false' || env === 'no') return false;
-  // Auto-enable in Docker / container runtimes where process dies between steps
-  return isDockerRuntime();
+  if (env === 'auto') return isDockerRuntime();
+  return true;
 }
 
 // ─── LAUNCH ───────────────────────────────────────────────────────────────────
@@ -1521,8 +1582,9 @@ function _serializeLocatorArg(arg) {
  * @param {ActionLogger} logger
  * @param {Page} rawPage    — the unwrapped page (for _safeUrl)
  * @param {string[]} chain  — accumulated method chain, e.g. ['getByRole("button")', 'first()']
+ * @param {(page: import('playwright').Page) => void | null} onActivity
  */
-function _createLoggingProxy(target, logger, rawPage, chain = []) {
+function _createLoggingProxy(target, logger, rawPage, chain = [], onActivity = null) {
   if (!target || typeof target !== 'object') return target;
 
   return new Proxy(target, {
@@ -1550,6 +1612,10 @@ function _createLoggingProxy(target, logger, rawPage, chain = []) {
         const callLabel = `${prop}(${prettyArgs.map(a => JSON.stringify(a)).join(', ')})`;
         const fullChain = [...chain, callLabel];
 
+        if (onActivity && isAction) {
+          try { onActivity(rawPage); } catch (_) {}
+        }
+
         // If this method returns a Locator, wrap the result recursively
         if (isLocatorReturning) {
           const result = value.apply(obj, args);
@@ -1557,7 +1623,7 @@ function _createLoggingProxy(target, logger, rawPage, chain = []) {
             logger.log('locator', { chain: fullChain.join(' → '), url: _safeUrl(rawPage) });
           }
           // Wrap the returned locator so subsequent .click() / .fill() are also logged
-          return _createLoggingProxy(result, logger, rawPage, fullChain);
+          return _createLoggingProxy(result, logger, rawPage, fullChain, onActivity);
         }
 
         // Action method — log before and after
@@ -1609,28 +1675,44 @@ function _createLoggingProxy(target, logger, rawPage, chain = []) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function buildResult(browser, ctx, page, logger) {
+function buildResult(browser, ctx, page, logger, opts = {}) {
+  const onActivePage = typeof opts.onActivePage === 'function' ? opts.onActivePage : null;
   // ── Attach page state tracking for console/network/error monitoring ──
   const rawPage = page;  // keep unwrapped reference for internal use
+  if (onActivePage) {
+    try { onActivePage(rawPage); } catch (_) {}
+  }
   ensurePageState(rawPage);
   const proxiedPage = logger.level !== 'off'
-    ? _createLoggingProxy(page, logger, rawPage)
+    ? _createLoggingProxy(page, logger, rawPage, [], onActivePage)
     : page;
 
   // ── Subscribe to page events for passive logging ──
   if (logger.level !== 'off') {
     rawPage.on('framenavigated', (frame) => {
       if (frame === rawPage.mainFrame()) {
+        if (onActivePage) {
+          try { onActivePage(rawPage); } catch (_) {}
+        }
         logger.log('navigated', { url: frame.url() });
       }
     });
     rawPage.on('popup', (popup) => {
+      if (onActivePage) {
+        try { onActivePage(popup); } catch (_) {}
+      }
       logger.log('popup', { url: _safeUrl(popup) });
     });
     rawPage.on('dialog', (dialog) => {
+      if (onActivePage) {
+        try { onActivePage(rawPage); } catch (_) {}
+      }
       logger.log('dialog', { type: dialog.type(), message: _truncate(dialog.message(), 300) });
     });
     rawPage.on('download', (download) => {
+      if (onActivePage) {
+        try { onActivePage(rawPage); } catch (_) {}
+      }
       logger.log('download', { filename: download.suggestedFilename(), url: download.url() });
     });
     rawPage.on('pageerror', (err) => {
@@ -1656,6 +1738,9 @@ function buildResult(browser, ctx, page, logger) {
     if (logger.level === 'off') return fn;
     return async (...args) => {
       const url = _safeUrl(rawPage);
+      if (onActivePage) {
+        try { onActivePage(rawPage); } catch (_) {}
+      }
       try {
         const result = await fn(...args);
         logger.log(name, { args: _sanitizeArgs(name, args), url, ok: true });
@@ -1836,10 +1921,27 @@ async function launchBrowser(opts = {}) {
 
       try {
         active.ctx.pages(); // throws if context is dead
-        const page = await active.ctx.newPage();
+        const openPages = active.ctx.pages().filter(p => !p.isClosed?.());
+        let page = null;
+        if (active.activePage && !active.activePage.isClosed?.()) {
+          page = active.activePage;
+        }
+        if (!page && openPages.length > 0) {
+          page = openPages[openPages.length - 1] || openPages[0];
+        }
+        if (!page) {
+          page = await active.ctx.newPage();
+        }
+        active.activePage = page;
         console.log(`[clawnet] Reusing browser for profile "${profileName}"`);
         logger.log('reuse', { profile: profileName });
-        return buildResult(active.browser, active.ctx, page, logger);
+        return buildResult(active.browser, active.ctx, page, logger, {
+          onActivePage: (nextPage) => {
+            if (nextPage && !nextPage.isClosed?.()) {
+              active.activePage = nextPage;
+            }
+          },
+        });
       } catch (_) {
         // Context died — remove and fall through to fresh launch
         _activeBrowsers.delete(profileName);
@@ -1910,10 +2012,22 @@ async function launchBrowser(opts = {}) {
     await applyStealthScripts(ctx, mobile, meta.locale);
     const page = ctx.pages()[0] || await ctx.newPage();
     const browser = ctx.browser();
-    const result = buildResult(browser, ctx, page, logger);
+    const activeEntry = {
+      browser,
+      ctx,
+      proxyEnabled: Boolean(proxy),
+      activePage: page,
+    };
+    const result = buildResult(browser, ctx, page, logger, {
+      onActivePage: (nextPage) => {
+        if (nextPage && !nextPage.isClosed?.()) {
+          activeEntry.activePage = nextPage;
+        }
+      },
+    });
 
     if (reuse) {
-      _activeBrowsers.set(profileName, { browser, ctx, proxyEnabled: Boolean(proxy) });
+      _activeBrowsers.set(profileName, activeEntry);
     }
 
     console.log(`[clawnet] Launched with persistent profile "${profileName}"`);
@@ -2056,7 +2170,13 @@ const PAGE_STATE_LIMITS = { console: 500, errors: 200, network: 500 };
 function ensurePageState(page) {
   if (_pageStates.has(page)) return _pageStates.get(page);
 
-  const state = { console: [], errors: [], network: [] };
+  const state = {
+    console: [],
+    errors: [],
+    network: [],
+    roleRefs: {},
+    roleRefsMode: null,
+  };
   const pendingReqs = new WeakMap();
   _pageStates.set(page, state);
 
@@ -2348,6 +2468,9 @@ async function snapshotAI(page, opts = {}) {
     if (!url || url === 'about:blank') {
       const msg = '[snapshotAI] Page is about:blank — call page.goto(url) first before taking a snapshot.';
       console.warn(msg);
+      const state = ensurePageState(page);
+      state.roleRefs = {};
+      state.roleRefsMode = null;
       return { snapshot: msg, refs: {} };
     }
   } catch (_) { /* page.url() may throw if page is closed */ }
@@ -2356,6 +2479,9 @@ async function snapshotAI(page, opts = {}) {
   if (!page._snapshotForAI) {
     // Fallback to ariaSnapshot if not available
     const yaml = await snapshot(page, { maxLength: maxChars, timeout });
+    const state = ensurePageState(page);
+    state.roleRefs = {};
+    state.roleRefsMode = 'role';
     return { snapshot: yaml, refs: {} };
   }
 
@@ -2383,8 +2509,9 @@ async function snapshotAI(page, opts = {}) {
     truncated = true;
   }
 
-  // Parse ref IDs with rich metadata: role, name from "- role "name" [ref=eN]"
+  // Parse ref IDs with rich metadata: role, name, nth from "- role "name" [ref=eN]"
   const refs = {};
+  const roleNameCounts = new Map();
   const lines = snap.split('\n');
   for (const line of lines) {
     const refMatch = line.match(/\[ref=(e\d+)\]/);
@@ -2394,11 +2521,28 @@ async function snapshotAI(page, opts = {}) {
     // Parse "- role "Name" ..." or "- role ..."
     const roleMatch = trimmed.match(/^-\s+(\w+)(?:\s+"([^"]*)")?/);
     if (roleMatch) {
-      refs[refId] = { role: roleMatch[1], name: roleMatch[2] || '' };
+      const role = roleMatch[1];
+      const name = roleMatch[2] || '';
+      const key = `${role}\u0000${name}`;
+      const nth = roleNameCounts.get(key) || 0;
+      roleNameCounts.set(key, nth + 1);
+      refs[refId] = { role, name, nth };
     } else {
       refs[refId] = true;
     }
   }
+
+  for (const refMeta of Object.values(refs)) {
+    if (!refMeta || typeof refMeta !== 'object' || !refMeta.role) continue;
+    const key = `${refMeta.role}\u0000${refMeta.name || ''}`;
+    if ((roleNameCounts.get(key) || 0) <= 1) {
+      delete refMeta.nth;
+    }
+  }
+
+  const state = ensurePageState(page);
+  state.roleRefs = refs;
+  state.roleRefsMode = 'aria';
 
   return { snapshot: snap, refs, truncated: truncated || undefined };
 }
@@ -2422,15 +2566,23 @@ async function snapshotAI(page, opts = {}) {
  * @returns {import('playwright').Locator}
  */
 function refLocator(page, ref, refMeta) {
-  if (refMeta && typeof refMeta === 'object' && refMeta.role) {
+  const normalizedRef = String(ref || '').trim().replace(/^@|^ref=/, '');
+  const state = ensurePageState(page);
+  const meta =
+    (refMeta && typeof refMeta === 'object' && refMeta.role ? refMeta : null) ||
+    (state.roleRefs && typeof state.roleRefs[normalizedRef] === 'object' ? state.roleRefs[normalizedRef] : null);
+
+  if (meta && typeof meta === 'object' && meta.role) {
     try {
-      const opts = refMeta.name ? { name: refMeta.name } : undefined;
-      return page.getByRole(refMeta.role, opts).first();
+      const opts = meta.name ? { name: meta.name, exact: true } : undefined;
+      const byRole = page.getByRole(meta.role, opts);
+      if (typeof meta.nth === 'number') return byRole.nth(meta.nth);
+      return byRole.first();
     } catch (_) {
       // getByRole may not support all roles — fall through to aria-ref
     }
   }
-  return page.locator(`aria-ref=${ref}`);
+  return page.locator(`aria-ref=${normalizedRef}`);
 }
 
 /**
@@ -2445,7 +2597,7 @@ function refLocator(page, ref, refMeta) {
  */
 async function clickRef(page, ref, opts = {}) {
   const { timeout = 8000, button = 'left', doubleClick = false } = opts;
-  const locator = page.locator(`aria-ref=${ref}`);
+  const locator = refLocator(page, ref, opts.refMeta);
   try {
     if (doubleClick) {
       await locator.dblclick({ timeout, button });
@@ -2474,7 +2626,7 @@ async function clickRef(page, ref, opts = {}) {
  */
 async function fillRef(page, ref, value, opts = {}) {
   const { timeout = 8000 } = opts;
-  const locator = page.locator(`aria-ref=${ref}`);
+  const locator = refLocator(page, ref, opts.refMeta);
   try {
     await locator.fill(value, { timeout });
   } catch (err) {
@@ -2499,7 +2651,7 @@ async function fillRef(page, ref, value, opts = {}) {
  */
 async function typeRef(page, ref, text, opts = {}) {
   const { slowly = false, submit = false, timeout = 8000 } = opts;
-  const locator = page.locator(`aria-ref=${ref}`);
+  const locator = refLocator(page, ref, opts.refMeta);
   try {
     if (slowly) {
       await locator.click({ timeout });
@@ -2530,7 +2682,7 @@ async function typeRef(page, ref, text, opts = {}) {
  */
 async function selectRef(page, ref, value, opts = {}) {
   const { timeout = 8000 } = opts;
-  const locator = page.locator(`aria-ref=${ref}`);
+  const locator = refLocator(page, ref, opts.refMeta);
   try {
     await locator.selectOption(value, { timeout });
   } catch (err) {
@@ -2552,7 +2704,7 @@ async function selectRef(page, ref, value, opts = {}) {
  */
 async function hoverRef(page, ref, opts = {}) {
   const { timeout = 8000 } = opts;
-  const locator = page.locator(`aria-ref=${ref}`);
+  const locator = refLocator(page, ref, opts.refMeta);
   try {
     await locator.hover({ timeout });
   } catch (err) {
@@ -2856,6 +3008,7 @@ module.exports = {
 
   // Internals (exposed for advanced users / daemon)
   makeProxy, buildDevice, resolveAgentCredentials,
+  areSelectorActionsEnabled, isSelectorAction, REF_ONLY_ACTION_MESSAGE,
 
   // Logging
   getSessionLogs, getSessionLog,

@@ -180,12 +180,16 @@ await page.getByRole('checkbox', { name: 'Remember me' }).check();
 When you see `- textbox "Email"` in the snapshot, use `page.getByRole('textbox', { name: 'Email' })`.
 When you see `- button "Submit"`, use `page.getByRole('button', { name: 'Submit' })`.
 
-### When to fall back to CSS selectors
+### CSS selectors are disabled by default
 
-Only use CSS selectors when:
-- The element has no accessible name or role (rare in modern sites)
-- You need to target by `data-testid` or other test attributes
-- Shadow DOM elements not reachable by semantic locators (use `shadowFill`/`shadowClickButton`)
+Selector-based actions are disabled in runtime by default for reliability on modern SPAs.
+Use refs from `snapshotAI()` (`clickRef`, `fillRef`, `typeRef`, `selectRef`, `hoverRef`).
+
+If you absolutely need selector actions for a legacy flow, enable them explicitly:
+
+```bash
+CN_ALLOW_SELECTOR_ACTIONS=1
+```
 
 ## Multi-tab — parallel tasks
 
@@ -523,6 +527,12 @@ CN_NO_PROXY=1
 **DO NOT close the browser between steps.** The browser persists automatically via a background daemon.
 
 **Key fact: `launchBrowser()` always returns the SAME tab.** Calling it multiple times does NOT create new tabs or pages — it reconnects to the existing browser and returns the active tab with all cookies and login sessions intact. This is the intended behavior.
+
+Daemon mode is enabled by default. Opt out only if needed:
+
+```bash
+CN_DAEMON=0
+```
 
 ### How it works between separate script runs
 
@@ -978,19 +988,21 @@ Execute multiple actions sequentially in a single call. Reduces LLM round-trips 
 | `stopOnError` | boolean | `false` | Halt on first failure |
 | `delayBetween` | number | `50` | ms delay between actions for realism |
 
-Each action: `{ action, selector, text, value, key, ms, options }`
+Each action: `{ action, ref, selector, text, value, key, ms, options }`
 
-Supported actions: `click`, `fill`, `type`, `press`, `hover`, `select`, `scroll`, `focus`, `wait`, `waitForSelector`, `humanClick`, `humanType`, `snapshot`
+Supported actions: `scroll`, `wait`, `snapshot`, `snapshotAI`, `clickRef`, `fillRef`, `typeRef`, `selectRef`, `hoverRef`.
+
+Selector-based actions (`click/fill/type/...` with `selector`) require `CN_ALLOW_SELECTOR_ACTIONS=1` and are not recommended.
 
 Returns: `{ results: [{index, success, result?, error?}], total, successful, failed }`
 
 ```javascript
-// Fill a booking form in one call
+// Fill a booking form in one call (ref-based)
 const result = await batchActions([
-  { action: 'fill',   selector: '#name',   text: 'John' },
-  { action: 'fill',   selector: '#phone',  text: '+1234567890' },
-  { action: 'select', selector: '#guests', value: '2' },
-  { action: 'humanClick', selector: '#submit' },
+  { action: 'fillRef',   ref: 'e4', value: 'John' },
+  { action: 'fillRef',   ref: 'e5', value: '+1234567890' },
+  { action: 'selectRef', ref: 'e6', value: '2' },
+  { action: 'clickRef',  ref: 'e8' },
 ], { stopOnError: true });
 // result.successful === 4, result.failed === 0
 ```

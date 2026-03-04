@@ -58,6 +58,26 @@ let _idleTimer    = null;
 let _server       = null;
 let _startedAt    = Date.now();
 
+function _browserLib() {
+  return require('./browser');
+}
+
+function _selectorActionsError(action) {
+  const lib = _browserLib();
+  return `${lib.REF_ONLY_ACTION_MESSAGE} (action="${action}")`;
+}
+
+function _assertBatchActionsAllowed(actions) {
+  const lib = _browserLib();
+  if (lib.areSelectorActionsEnabled()) return;
+  for (const act of actions) {
+    const isGlobalPress = act?.action === 'press' && !act?.selector;
+    if (lib.isSelectorAction(act?.action) && !isGlobalPress) {
+      throw new Error(_selectorActionsError(act.action));
+    }
+  }
+}
+
 // ── Tab Manager ─────────────────────────────────────────────────────────────
 // Maps tabId → { page, createdAt, label }
 // Active tab = most recently used tab
@@ -302,7 +322,7 @@ async function handleGoto(body) {
 async function handleSnapshot(body) {
   const page = _resolveTabPage(body.tabId);
   const { selector = 'body', interactiveOnly = false, maxLength = 20000, timeout = 5000 } = body;
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = await browserLib.snapshot(page, { selector, interactiveOnly, maxLength, timeout });
   return { ok: true, tabId: body.tabId || _activeTabId, snapshot: result };
 }
@@ -310,73 +330,73 @@ async function handleSnapshot(body) {
 async function handleSnapshotAI(body) {
   const page = _resolveTabPage(body.tabId);
   const { maxChars = 20000, timeout = 5000, interactiveOnly, compact, maxDepth } = body;
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = await browserLib.snapshotAI(page, { maxChars, timeout, interactiveOnly, compact, maxDepth });
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
 
 async function handleClickRef(body) {
   const page = _resolveTabPage(body.tabId);
-  const { ref, timeout = 8000, button = 'left', doubleClick = false } = body;
+  const { ref, timeout = 8000, button = 'left', doubleClick = false, refMeta } = body;
   if (!ref) return { error: 'ref required' };
-  const browserLib = require('./browser');
-  await browserLib.clickRef(page, ref, { timeout, button, doubleClick });
-  return { ok: true };
+  const browserLib = _browserLib();
+  await browserLib.clickRef(page, ref, { timeout, button, doubleClick, refMeta });
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url() };
 }
 
 async function handleFillRef(body) {
   const page = _resolveTabPage(body.tabId);
-  const { ref, value, timeout = 8000 } = body;
+  const { ref, value, timeout = 8000, refMeta } = body;
   if (!ref) return { error: 'ref required' };
-  const browserLib = require('./browser');
-  await browserLib.fillRef(page, ref, value || '', { timeout });
-  return { ok: true };
+  const browserLib = _browserLib();
+  await browserLib.fillRef(page, ref, value || '', { timeout, refMeta });
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url() };
 }
 
 async function handleTypeRef(body) {
   const page = _resolveTabPage(body.tabId);
-  const { ref, text, slowly = false, submit = false, timeout = 8000 } = body;
+  const { ref, text, slowly = false, submit = false, timeout = 8000, refMeta } = body;
   if (!ref) return { error: 'ref required' };
-  const browserLib = require('./browser');
-  await browserLib.typeRef(page, ref, text || '', { slowly, submit, timeout });
-  return { ok: true };
+  const browserLib = _browserLib();
+  await browserLib.typeRef(page, ref, text || '', { slowly, submit, timeout, refMeta });
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url() };
 }
 
 async function handleSelectRef(body) {
   const page = _resolveTabPage(body.tabId);
-  const { ref, value, timeout = 8000 } = body;
+  const { ref, value, timeout = 8000, refMeta } = body;
   if (!ref) return { error: 'ref required' };
-  const browserLib = require('./browser');
-  await browserLib.selectRef(page, ref, value, { timeout });
-  return { ok: true };
+  const browserLib = _browserLib();
+  await browserLib.selectRef(page, ref, value, { timeout, refMeta });
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url() };
 }
 
 async function handleHoverRef(body) {
   const page = _resolveTabPage(body.tabId);
-  const { ref, timeout = 8000 } = body;
+  const { ref, timeout = 8000, refMeta } = body;
   if (!ref) return { error: 'ref required' };
-  const browserLib = require('./browser');
-  await browserLib.hoverRef(page, ref, { timeout });
-  return { ok: true };
+  const browserLib = _browserLib();
+  await browserLib.hoverRef(page, ref, { timeout, refMeta });
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url() };
 }
 
 async function handleScrollDown(body) {
   const page = _resolveTabPage(body.tabId);
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   await browserLib.scrollDown(page, { pixels: body.pixels });
   return { ok: true, tabId: body.tabId || _activeTabId };
 }
 
 async function handleScrollUp(body) {
   const page = _resolveTabPage(body.tabId);
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   await browserLib.scrollUp(page, { pixels: body.pixels });
   return { ok: true, tabId: body.tabId || _activeTabId };
 }
 
 async function handleDismissOverlays(body) {
   const page = _resolveTabPage(body.tabId);
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = await browserLib.dismissOverlays(page);
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
@@ -392,7 +412,7 @@ async function handleScreenshotWithLabels(body) {
   const page = _resolveTabPage(body.tabId);
   const { refs, fullPage = false } = body;
   if (!refs || typeof refs !== 'object') return { error: 'refs object required' };
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = await browserLib.takeScreenshotWithLabels(page, refs, { fullPage });
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
@@ -400,7 +420,7 @@ async function handleScreenshotWithLabels(body) {
 async function handleConsoleMessages(body) {
   const page = _resolveTabPage(body.tabId);
   const { type, last, pattern } = body;
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = browserLib.getConsoleMessages(page, { type, last, pattern });
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
@@ -408,7 +428,7 @@ async function handleConsoleMessages(body) {
 async function handlePageErrors(body) {
   const page = _resolveTabPage(body.tabId);
   const { last } = body;
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = browserLib.getPageErrors(page, { last });
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
@@ -416,7 +436,7 @@ async function handlePageErrors(body) {
 async function handleNetworkRequests(body) {
   const page = _resolveTabPage(body.tabId);
   const { last, urlPattern, method, failedOnly } = body;
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = browserLib.getNetworkRequests(page, { last, urlPattern, method, failedOnly });
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
@@ -424,7 +444,7 @@ async function handleNetworkRequests(body) {
 async function handleExtractText(body) {
   const page = _resolveTabPage(body.tabId);
   const { mode = 'readability', maxChars } = body;
-  const browserLib = require('./browser');
+  const browserLib = _browserLib();
   const result = await browserLib.extractText(page, { mode, maxChars });
   return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
@@ -433,9 +453,10 @@ async function handleBatchActions(body) {
   const page = _resolveTabPage(body.tabId);
   const { actions, stopOnError = false, delayBetween = 50 } = body;
   if (!Array.isArray(actions)) return { error: 'actions array required' };
-  const browserLib = require('./browser');
+  _assertBatchActionsAllowed(actions);
+  const browserLib = _browserLib();
   const result = await browserLib.batchActions(page, actions, { stopOnError, delayBetween });
-  return { ok: true, ...result };
+  return { ok: true, tabId: body.tabId || _activeTabId, ...result };
 }
 
 async function handleEval(body) {
@@ -443,7 +464,7 @@ async function handleEval(body) {
   const { expression } = body;
   if (!expression) return { error: 'expression required' };
   const result = await page.evaluate(expression);
-  return { ok: true, result };
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url(), result };
 }
 
 async function handleGetCookies(body) {
@@ -471,7 +492,7 @@ async function handleWait(body) {
   const page = _resolveTabPage(body.tabId);
   const { ms = 1000 } = body;
   await page.waitForTimeout(Math.min(ms, 30000));
-  return { ok: true };
+  return { ok: true, tabId: body.tabId || _activeTabId, url: page.url() };
 }
 
 async function handleClose() {
