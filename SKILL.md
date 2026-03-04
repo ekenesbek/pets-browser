@@ -59,15 +59,18 @@ const formTree = await browser.snapshot({ selector: 'form' });
 
 ### Observation workflow
 
+**IMPORTANT: Always `page.goto(url)` BEFORE calling `snapshotAI()`.** Snapshot on `about:blank` returns nothing. Navigate first, then observe.
+
 Before every action, follow this sequence:
 
-1. **Dismiss overlays & accept cookies** — after every `page.goto()`, call `await browser.dismissOverlays()` to auto-close cookie banners, consent popups, and notification prompts. If a cookie banner or consent dialog is still visible in the snapshot, click "Accept" / "Accept all" / "Принять" before doing anything else. Never skip this step — cookie overlays block interaction with page elements underneath.
-2. **Snapshot** — `const { snapshot } = await browser.snapshotAI()` to see the page with refs
-3. **Read text** — `await browser.extractText()` if you need clean readable text (menus, prices, articles)
-4. **Visual check** — `await browser.takeScreenshot()` only if you need to see colors, layout, maps, or images
-5. **Act by ref** — `await browser.clickRef('e4')`, `await browser.fillRef('e5', 'text')` etc.
-6. **Verify** — `await browser.snapshotAI()` again to confirm the action worked
-7. **Batch** — use `batchActions()` for multi-step flows
+1. **Navigate** — `await page.goto('https://...')` — always navigate before observing. `snapshotAI()` on a blank page returns an empty result.
+2. **Dismiss overlays & accept cookies** — after every `page.goto()`, call `await browser.dismissOverlays()` to auto-close cookie banners, consent popups, and notification prompts. If a cookie banner or consent dialog is still visible in the snapshot, click "Accept" / "Accept all" / "Принять" before doing anything else. Never skip this step — cookie overlays block interaction with page elements underneath.
+3. **Snapshot** — `const { snapshot } = await browser.snapshotAI()` to see the page with refs
+4. **Read text** — `await browser.extractText()` if you need clean readable text (menus, prices, articles)
+5. **Visual check** — `await browser.takeScreenshot()` only if you need to see colors, layout, maps, or images
+6. **Act by ref** — `await browser.clickRef('e4')`, `await browser.fillRef('e5', 'text')` etc.
+7. **Verify** — `await browser.snapshotAI()` again to confirm the action worked
+8. **Batch** — use `batchActions()` for multi-step flows
 
 ### Targeting elements — use refs from snapshotAI()
 
@@ -442,7 +445,9 @@ CN_NO_PROXY=1
 
 ## Browser lifecycle
 
-**DO NOT close the browser between steps.** The browser persists automatically via a background daemon. Just call `launchBrowser()` at the start of each script — it reconnects to the existing browser with all your tabs, cookies, and login sessions intact.
+**DO NOT close the browser between steps.** The browser persists automatically via a background daemon.
+
+**Key fact: `launchBrowser()` always returns the SAME tab.** Calling it multiple times does NOT create new tabs or pages — it reconnects to the existing browser and returns the active tab with all cookies and login sessions intact. This is the intended behavior.
 
 ```javascript
 // Script 1: agent logs into a site
@@ -454,8 +459,19 @@ await b.clickRef('e5');
 
 // Script 2 (later): agent continues where it left off
 const b = await launchBrowser({ country: 'us' });
-// Same browser, same tab, same cookies — still logged in
+// Same browser, SAME TAB, same cookies — still logged in
+// b.page is the exact same page object as before
 await b.snapshotAI();  // sees the logged-in page
+```
+
+### Calling launchBrowser() multiple times is safe
+
+```javascript
+const b1 = await launchBrowser();
+// ... do some work ...
+const b2 = await launchBrowser();
+// b2 is the SAME tab as b1 — no new page is created
+// This is fine and expected. Use it freely at the start of each script.
 ```
 
 ### What NOT to do
@@ -464,11 +480,6 @@ await b.snapshotAI();  // sees the logged-in page
 // BAD — kills the browser, loses all state
 await browser.close();
 await closeBrowser();
-
-// BAD — opening a new browser when you already have one
-const b1 = await launchBrowser();
-// ... do some work ...
-const b2 = await launchBrowser();  // this REUSES b1, doesn't create a new browser
 ```
 
 ### When to actually close

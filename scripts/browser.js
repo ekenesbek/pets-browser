@@ -2068,6 +2068,16 @@ async function snapshot(page, opts = {}) {
 async function snapshotAI(page, opts = {}) {
   const { maxChars = 20000, timeout = 5000 } = opts;
 
+  // Guard: warn if page is blank (agent forgot to navigate first)
+  try {
+    const url = page.url();
+    if (!url || url === 'about:blank') {
+      const msg = '[snapshotAI] Page is about:blank — call page.goto(url) first before taking a snapshot.';
+      console.warn(msg);
+      return { snapshot: msg, refs: {} };
+    }
+  } catch (_) { /* page.url() may throw if page is closed */ }
+
   // _snapshotForAI is a private Playwright API (available in 1.58+)
   if (!page._snapshotForAI) {
     // Fallback to ariaSnapshot if not available
