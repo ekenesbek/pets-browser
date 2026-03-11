@@ -1,7 +1,7 @@
 {
   "name": "clawnet",
   "version": "1.0.0",
-  "description": "Stealth Chromium for AI agents: anti-detection, residential proxies, CAPTCHA solving",
+  "description": "Stealth browser for AI agents: PinchTab + anti-detection, residential proxies, CAPTCHA solving",
   "main": "./scripts/browser.js",
   "exports": {
     ".": "./scripts/browser.js",
@@ -15,9 +15,6 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.js"
   },
-  "peerDependencies": {
-    "playwright": "^1.58.1"
-  },
   "keywords": [
     "stealth-browser",
     "anti-detection",
@@ -26,7 +23,7 @@
     "clawhub",
     "openclaw",
     "ai-agent",
-    "playwright",
+    "pinchtab",
     "residential-proxy",
     "2captcha"
   ],
